@@ -45,19 +45,20 @@
 (set-face-attribute 'tab-bar nil :height 160)
 
 (require 'package)
-(setq package-enable-at-startup nil)
-(add-to-list 'package-archives '("melpa" . "https://melpa.org/packages/") t)
-(add-to-list 'package-archives '("gnu" . "https://elpa.gnu.org/packages/") t)
+(setq package-archives
+      '(("gnu"   . "https://elpa.gnu.org/packages/")
+        ("nongnu" . "https://elpa.nongnu.org/nongnu/")
+        ("melpa" . "https://melpa.org/packages/")))
 (package-initialize)
+(unless package-archive-contents
+  (package-refresh-contents))
+(unless (package-installed-p 'use-package)
+  (package-install 'use-package))
+(require 'use-package)
+(setq use-package-always-ensure t)
 
 ;; Maple Mono 17
 (set-frame-font "FantasqueSansM Nerd Font 20" nil t)
-
-(unless (package-installed-p 'use-package)
-  (package-refresh-contents)
-  (package-install 'use-package))
-(eval-when-compile
-  (require 'use-package))
 
 (require 'grep)
 (setq grep-command "grep -nH --color=auto -r -e ")
@@ -161,19 +162,17 @@
         (find-file (expand-file-name file))
       (user-error "No filename at point"))))
 
-(general-define-key
- :keymaps 'global
- "C-v" #'scroll-half-page-up
- "M-v" #'scroll-half-page-down
- "C-x _" #'maximize-window
- "C-c c" #'project-compile
- "C-c t" (lambda () (interactive) (tab-new) (vterm) (recenter))
- "C-c C-b" 'grep
- "C-c C" #'compile
- "C-c C-l" (lambda () (interactive) (duplicate-line) (next-line))
- "C-c o" #'open-file-at-point
- "M-p" #'move-text-up
- "M-n" #'move-text-down)
+(keymap-global-set "C-v" #'scroll-half-page-up)
+(keymap-global-set "M-v" #'scroll-half-page-down)
+(keymap-global-set "C-x _" #'maximize-window)
+(keymap-global-set "C-c c" #'project-compile)
+(keymap-global-set "C-c C" #'compile)
+(keymap-global-set "C-c t" (lambda () (interactive) (tab-new) (vterm) (recenter)))
+(keymap-global-set "C-c C-b" #'grep)
+(keymap-global-set "C-c C-l" (lambda () (interactive) (duplicate-line) (next-line)))
+(keymap-global-set "C-c o" #'open-file-at-point)
+(keymap-global-set "M-p" #'move-text-up)
+(keymap-global-set "M-n" #'move-text-down)
 
 ;; Theme
 
@@ -203,6 +202,7 @@
   :commands vterm)
 
 (use-package undo-tree
+  :ensure t
   :init
   (setq undo-tree-visualizer-timestamps t
         undo-tree-history-directory-alist `(("." . ,(expand-file-name "undo-history" user-emacs-directory)))
@@ -326,9 +326,11 @@
   :hook ((html-mode css-mode sgml-mode web-mode js-jsx-mode tsx-ts-mode) . emmet-mode))
 
 (use-package flycheck
+  :ensure t
   :init (global-flycheck-mode))
 
 (use-package apheleia
+  :ensure t
   :config
   (apheleia-global-mode +1))
 
@@ -346,4 +348,3 @@
         ("TAB" . copilot-accept-completion)))
 
 ;; (add-hook 'prog-mode-hook 'copilot-mode)
-(put 'downcase-region 'disabled nil)
