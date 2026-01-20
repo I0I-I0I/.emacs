@@ -20,8 +20,6 @@
                   file-name-handler-alist my/file-name-handler-alist-orig)
             (run-with-idle-timer 5 nil #'garbage-collect)))
 
-(setq read-process-output-max (* 1024 1024))
-
 (setq auto-save-default nil)
 (setq make-backup-files nil)
 
@@ -39,10 +37,9 @@
 
 (run-with-idle-timer 10 t #'garbage-collect)
 
+(set-face-attribute 'tab-bar nil :height 160)
 (setq tab-bar-close-button-show nil
       tab-bar-new-button-show nil)
-
-(set-face-attribute 'tab-bar nil :height 160)
 
 (require 'package)
 (setq package-archives
@@ -86,10 +83,24 @@
 (save-place-mode 1)
 (global-hl-line-mode 1)
 
+(global-auto-revert-mode 1)
+(setq auto-revert-verbose nil)
+(fset 'yes-or-no-p 'y-or-n-p)
 (setq savehist-additional-variables '(register-alist))
 (savehist-mode 1)
 (which-key-mode 1)
 (editorconfig-mode 1)
+
+(prefer-coding-system 'utf-8-unix)
+(setq-default buffer-file-coding-system 'utf-8-unix)
+
+(custom-set-variables
+ '(uniquify-buffer-name-style (quote post-forward) nil (uniquify)))
+
+(require 'whitespace)
+(setq whitespace-style '(face empty tabs lines-tail trailing))
+(setq whitespace-line-column 80)
+(global-whitespace-mode t)
 
 (require 'ido)
 (ido-mode 1)
@@ -167,10 +178,10 @@
 (keymap-global-set "C-x _" #'maximize-window)
 (keymap-global-set "C-c c" #'project-compile)
 (keymap-global-set "C-c C" #'compile)
-(keymap-global-set "C-c t" (lambda () (interactive) (tab-new) (vterm) (recenter)))
 (keymap-global-set "C-c C-b" #'grep)
 (keymap-global-set "C-c C-l" (lambda () (interactive) (duplicate-line) (next-line)))
 (keymap-global-set "C-c o" #'open-file-at-point)
+(keymap-global-set "C-c C-o" #'browse-url-at-point)
 (keymap-global-set "M-p" #'move-text-up)
 (keymap-global-set "M-n" #'move-text-down)
 
@@ -180,7 +191,7 @@
   :ensure t
   :config
   (add-to-list 'default-frame-alist '(undecorated . t))
-  (load-theme 'almost-mono-white t)
+  (load-theme 'almost-mono-black t)
   (setq frame-background-mode 'light)
   (when (memq 'almost-mono-black custom-enabled-themes)
     (custom-set-faces
@@ -197,9 +208,20 @@
 
 ;; Plugins
 
+;; Term/Shell
+
 (use-package vterm
   :ensure t
-  :commands vterm)
+  :commands vterm
+  :bind (("C-c t" . vterm)))
+
+(use-package eshell
+  :ensure nil
+  :config
+  (setq eshell-scroll-to-bottom-on-input 'all)
+  :bind (("C-c e" . eshell)))
+
+;; Undo tree
 
 (use-package undo-tree
   :ensure t
@@ -212,15 +234,26 @@
   :config
   (global-undo-tree-mode))
 
+;;; Git
+
 (use-package magit
   :ensure t
   :commands (magit-status magit-dispatch)
-  :bind (("C-x g" . magit-status)))
+  :bind (("C-c g g" . magit-status)))
+
+(use-package git-timemachine
+  :vc (:url "https://codeberg.org/pidu/git-timemachine"
+            :rev :newest
+            :branch "master")
+  :bind (("C-c g t" . git-timemachine)))
+
+;; Expand region
 
 (use-package expand-region
   :ensure t
   :bind (("M-h" . er/expand-region)))
 
+;; Multi cursors
 (use-package multiple-cursors
   :vc (:url "https://github.com/magnars/multiple-cursors.el"
             :rev :newest
@@ -232,19 +265,15 @@
          ("C-M->" . mc/skip-to-next-like-this)
          ("C-M-<" . mc/skip-to-previous-like-this)))
 
+;; Jumps
+
 (use-package avy
   :vc (:url "https://github.com/abo-abo/avy"
             :rev :newest
             :branch "master")
   :bind (("C-'" . avy-goto-word-1)))
 
-(use-package yasnippet
-  :vc (:url "https://github.com/joaotavora/yasnippet"
-            :rev :newest
-            :branch "master")
-  :ensure t
-  :config
-  (yas-global-mode 1))
+;; LSP
 
 (use-package eglot
   :ensure t
@@ -294,6 +323,14 @@
         ("C-c a" . eglot-code-actions)
         ("C-c r" . eglot-rename)))
 
+(use-package yasnippet
+  :vc (:url "https://github.com/joaotavora/yasnippet"
+            :rev :newest
+            :branch "master")
+  :ensure t
+  :config
+  (yas-global-mode 1))
+
 (use-package corfu
   :ensure t
   :init
@@ -306,7 +343,7 @@
   :ensure t
   :init
   (global-corfu-mode 1)
-  (setq corfu-auto t
+  (setq corfu-auto nil
         corfu-cycle t
         corfu-echo-delay 1.0
         corfu-popupinfo-delay 1.0))
@@ -338,6 +375,8 @@
   :mode (("\\.ts\\'"  . typescript-ts-mode)
          ("\\.tsx\\'" . tsx-ts-mode)))
 
+;; AI
+
 (use-package copilot
   :vc (:url "https://github.com/copilot-emacs/copilot.el"
             :rev :newest
@@ -348,3 +387,85 @@
         ("TAB" . copilot-accept-completion)))
 
 ;; (add-hook 'prog-mode-hook 'copilot-mode)
+
+;; Buffers
+
+;; (global-unset-key (kbd "C-z"))
+;; (use-package bufferlo
+;;   :ensure t
+;;   :init
+;;   (bufferlo-mode 1)
+;;   (setq bufferlo-bookmarks-auto-save-interval 600)    ; Auto-save every 10 minutes
+;;   (setq bufferlo-auto-update-delay 0.1)               ; Faster response time
+;;   (setq bufferlo-bookmarks-default-directory "~/.emacs.d/bufferlo/")
+;;   (setq bufferlo-menu-bar-show t)
+;;   (setq bufferlo-menu-bar-list-buffers 'ibuffer)
+;;   (setq bufferlo-prefer-local-buffers 'tabs)
+;;   (setq bufferlo-ibuffer-bind-local-buffer-filter t)
+;;   (setq bufferlo-ibuffer-bind-keys t)
+;;   :config
+;;   (bufferlo-mode 1)
+;;   (with-eval-after-load 'desktop
+;;     (add-hook 'desktop-after-read-hook 'bufferlo-desktop-restore))
+;;   :bind
+;;   ( ;; buffer / ibuffer
+;;    ("C-x b" . bufferlo-switch-to-buffer)
+;;    ("C-z C-b" . bufferlo-ibuffer)
+;;    ("C-z M-C-b" . bufferlo-ibuffer-orphans)
+;;    ("C-z b -" . bufferlo-remove)
+;;    ;; general bookmark (interactive)
+;;    ("C-z b l" . bufferlo-bms-load)
+;;    ("C-z b s" . bufferlo-bms-save)
+;;    ("C-z b c" . bufferlo-bms-close)
+;;    ("C-z b r" . bufferlo-bm-raise)
+;;    ;; dwim frame or tab bookmarks
+;;    ("C-z d s" . bufferlo-bm-save)
+;;    ("C-z d l" . bufferlo-bm-load)
+;;    ("C-z d 0" . bufferlo-bm-close)
+;;    ;; tabs
+;;    ("C-z t s" . bufferlo-bm-tab-save)
+;;    ("C-z t u" . bufferlo-bm-tab-save-curr)
+;;    ("C-z t l" . bufferlo-bm-tab-load)
+;;    ("C-z t r" . bufferlo-bm-tab-load-curr)
+;;    ("C-z t 0" . bufferlo-bm-tab-close-curr)
+;;    ;; frames
+;;    ("C-z f s" . bufferlo-bm-frame-save)
+;;    ("C-z f u" . bufferlo-bm-frame-save-curr)
+;;    ("C-z f l" . bufferlo-bm-frame-load)
+;;    ("C-z f r" . bufferlo-bm-frame-load-curr)
+;;    ("C-z f m" . bufferlo-bm-frame-load-merge)
+;;    ("C-z f 0" . bufferlo-bm-frame-close-curr)
+;;    ;; sets
+;;    ("C-z s s" . bufferlo-set-save)
+;;    ("C-z s u" . bufferlo-set-save-curr)
+;;    ("C-z s +" . bufferlo-set-add)
+;;    ("C-z s =" . bufferlo-set-add)
+;;    ("C-z s -" . bufferlo-set-remove)
+;;    ("C-z s l" . bufferlo-set-load)
+;;    ("C-z s 0" . bufferlo-set-close)
+;;    ("C-z s c" . bufferlo-set-clear)
+;;    ("C-z s L" . bufferlo-set-list)))
+
+;; Utils
+
+(use-package pdf-tools
+  :ensure t
+  :hook (pdf-view-mode . (lambda ()
+                           (pdf-view-midnight-minor-mode 1)
+                           (display-line-numbers-mode -1)))
+  :config
+  (pdf-tools-install)
+  (pdf-loader-install))
+
+;; (add-to-list 'load-path "~/.emacs.d/site-lisp/emacs-application-framework/")
+;; (require 'eaf)
+;; (require 'eaf-browser)
+;; (require 'eaf-org-previewer)
+;; (require 'eaf-image-viewer)
+;; (require 'eaf-music-player)
+;; (require 'eaf-git)
+;; (require 'eaf-markdown-previewer)
+;; (require 'eaf-file-manager)
+;; (require 'eaf-video-player)
+;; (require 'eaf-system-monitor)
+;; (require 'eaf-pdf-viewer)
