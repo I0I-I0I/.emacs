@@ -1,4 +1,4 @@
-(setq custom-file "~/.emacs.d/custom.el")
+(setq custom-file "~/custom.el")
 
 (push '(fullscreen . maximized) default-frame-alist)
 
@@ -58,8 +58,6 @@
   (package-install 'use-package))
 (eval-when-compile
   (require 'use-package))
-
-(setq frame-background-mode 'dark)
 
 (require 'grep)
 (setq grep-command "grep -nH --color=auto -r -e ")
@@ -154,6 +152,15 @@
   (interactive "*p")
   (move-text-internal (- arg)))
 
+(defun open-file-at-point ()
+  "Open the file name at point. Supports ~/ and ./ paths."
+  (interactive)
+  (require 'ffap)
+  (let ((file (or (ffap-file-at-point) (thing-at-point 'filename t))))
+    (if file
+        (find-file (expand-file-name file))
+      (user-error "No filename at point"))))
+
 (general-define-key
  :keymaps 'global
  "C-v" #'scroll-half-page-up
@@ -164,6 +171,7 @@
  "C-c C-b" 'grep
  "C-c C" #'compile
  "C-c C-l" (lambda () (interactive) (duplicate-line) (next-line))
+ "C-c o" #'open-file-at-point
  "M-p" #'move-text-up
  "M-n" #'move-text-down)
 
@@ -173,7 +181,8 @@
   :ensure t
   :config
   (add-to-list 'default-frame-alist '(undecorated . t))
-  (load-theme 'almost-mono-black t)
+  (load-theme 'almost-mono-white t)
+  (setq frame-background-mode 'light)
   (when (memq 'almost-mono-black custom-enabled-themes)
     (custom-set-faces
      '(line-number ((t (:foreground "#3a3f5a" :background nil))))
@@ -181,6 +190,7 @@
      '(tab-bar ((t (:background "#000000" :foreground "#c0caf5" :box nil))))
      '(tab-bar-tab ((t (:background "#222222" :foreground "#c5c9c5" :weight bold))))
      '(tab-bar-tab-inactive ((t (:background nil :foreground "#565f89" :box nil)))))
+    (setq frame-background-mode 'dark)
     (set-frame-parameter nil 'alpha-background 70)
     (add-to-list 'default-frame-alist '(alpha-background . 70))
     (add-to-list 'default-frame-alist '(background-color . "#000000"))
@@ -292,6 +302,15 @@
   (setq corfu-auto t
         corfu-cycle t))
 
+(use-package corfu
+  :ensure t
+  :init
+  (global-corfu-mode 1)
+  (setq corfu-auto t
+        corfu-cycle t
+        corfu-echo-delay 1.0
+        corfu-popupinfo-delay 1.0))
+
 (use-package cape
   :ensure t
   :init
@@ -327,3 +346,4 @@
         ("TAB" . copilot-accept-completion)))
 
 ;; (add-hook 'prog-mode-hook 'copilot-mode)
+(put 'downcase-region 'disabled nil)
