@@ -1,4 +1,15 @@
+;; git clone https://git.savannah.gnu.org/git/emacs.git
+;; cd emacs
+;; git checkout emacs-30.2
+;; ./autogen.sh
+;; ./configure --prefix=/usr/local --with-x --with-x-toolkit=gtk3 --without-pgtk --with-native-compilation --with-tree-sitter --with-modules --with-cairo --with-imagemagick --with-xft
+;; make -j$(nproc)
+;; sudo make install
+
 (setq custom-file "~/custom.el")
+
+(declare-function cape-keyword "cape")
+(declare-function ffap-file-at-point "ffap")
 
 (push '(fullscreen . maximized) default-frame-alist)
 
@@ -40,19 +51,6 @@
 (set-face-attribute 'tab-bar nil :height 160)
 (setq tab-bar-close-button-show nil
       tab-bar-new-button-show nil)
-
-(require 'package)
-(setq package-archives
-      '(("gnu"   . "https://elpa.gnu.org/packages/")
-        ("nongnu" . "https://elpa.nongnu.org/nongnu/")
-        ("melpa" . "https://melpa.org/packages/")))
-(package-initialize)
-(unless package-archive-contents
-  (package-refresh-contents))
-(unless (package-installed-p 'use-package)
-  (package-install 'use-package))
-(require 'use-package)
-(setq use-package-always-ensure t)
 
 ;; Maple Mono 17
 (set-frame-font "FantasqueSansM Nerd Font 20" nil t)
@@ -102,23 +100,19 @@
 (setq whitespace-line-column 80)
 (global-whitespace-mode t)
 
-(require 'ido)
-(ido-mode 1)
-(ido-everywhere 1)
-(setq ido-enable-flex-matching t      ;; fuzzy matching
-      ido-create-new-buffer 'always
-      ido-use-filename-at-point 'guess
-      ido-save-directory-list-file
-      (expand-file-name "ido.last" user-emacs-directory))
-
 ;; (global-completion-preview-mode 1)
 (fido-vertical-mode 1)
-(setq completion-styles '(basic flex) ;; fuzzy fido
+(setq completion-styles '(basic flex)
+      completions-format 'vertical
+      completions-max-height 15
       completions-sort 'historical
-      completions-max-height 20
-      completions-format 'one-column
-      completion-auto-select t
-      completion-auto-help 'visible)
+      completion-auto-select nil)
+
+(setq completions-detailed t
+      completions-highlight-face 'completions-highlight)
+
+(setq completion-auto-help 'visible
+      completions-format 'one-column)
 
 (defun scroll-half-page-down ()
   "scroll down half the page"
@@ -185,6 +179,21 @@
 (keymap-global-set "M-p" #'move-text-up)
 (keymap-global-set "M-n" #'move-text-down)
 
+;; Plugins
+
+(require 'package)
+(setq package-archives
+      '(("gnu"   . "https://elpa.gnu.org/packages/")
+        ("nongnu" . "https://elpa.nongnu.org/nongnu/")
+        ("melpa" . "https://melpa.org/packages/")))
+(package-initialize)
+(unless package-archive-contents
+  (package-refresh-contents))
+(unless (package-installed-p 'use-package)
+  (package-install 'use-package))
+(require 'use-package)
+(setq use-package-always-ensure t)
+
 ;; Theme
 
 (use-package almost-mono-themes
@@ -206,20 +215,17 @@
     (add-to-list 'default-frame-alist '(background-color . "#000000"))
     (set-face-background 'default "#000000")))
 
-;; Plugins
-
 ;; Term/Shell
 
 (use-package vterm
   :ensure t
-  :commands vterm
-  :bind (("C-c t" . vterm)))
+  :commands vterm)
 
 (use-package eshell
   :ensure nil
   :config
   (setq eshell-scroll-to-bottom-on-input 'all)
-  :bind (("C-c e" . eshell)))
+  :bind (("C-c t" . eshell)))
 
 ;; Undo tree
 
@@ -390,7 +396,8 @@
 
 ;; Buffers
 
-;; (global-unset-key (kbd "C-z"))
+(global-unset-key (kbd "C-z"))
+
 ;; (use-package bufferlo
 ;;   :ensure t
 ;;   :init
@@ -448,24 +455,59 @@
 
 ;; Utils
 
-(use-package pdf-tools
-  :ensure t
-  :hook (pdf-view-mode . (lambda ()
-                           (pdf-view-midnight-minor-mode 1)
-                           (display-line-numbers-mode -1)))
-  :config
-  (pdf-tools-install)
-  (pdf-loader-install))
+;;; Video player
 
-;; (add-to-list 'load-path "~/.emacs.d/site-lisp/emacs-application-framework/")
-;; (require 'eaf)
-;; (require 'eaf-browser)
-;; (require 'eaf-org-previewer)
-;; (require 'eaf-image-viewer)
-;; (require 'eaf-music-player)
-;; (require 'eaf-git)
-;; (require 'eaf-markdown-previewer)
-;; (require 'eaf-file-manager)
-;; (require 'eaf-video-player)
-;; (require 'eaf-system-monitor)
-;; (require 'eaf-pdf-viewer)
+(use-package emms
+  :ensure t)
+
+;; https://github.com/lorniu/mpvi
+;; ~/.config/mpv/input.conf
+;; %APPDATA%\mpv\input.conf
+;;;  Ctrl+r cycle-values video-rotate "0" "270" "180" "90"
+(use-package mpvi
+  :ensure t
+  :config
+  (setq mpvi-mpv-ontop-p t)
+  :bind (("C-c C-v" . mpvi-play)
+         ("C-c v s" . mpvi-speed)))
+
+;; Other
+
+(add-to-list 'load-path "~/.emacs.d/site-lisp/emacs-application-framework/")
+(require 'eaf)
+(require 'eaf-browser)
+(require 'eaf-org-previewer)
+(require 'eaf-image-viewer)
+(require 'eaf-music-player)
+(require 'eaf-video-player)
+(require 'eaf-markdown-previewer)
+(require 'eaf-file-manager)
+(require 'eaf-pdf-viewer)
+
+(defun adviser-find-file (orig-fn file &rest args)
+  (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
+    (pcase (file-name-extension file)
+      ((or "pdf" "epub")
+       (funcall fn file))
+      (_
+       (apply orig-fn file args)))))
+
+(advice-add #'find-file :around #'adviser-find-file)
+
+(setq eaf-browser-translate-language "en")
+(setq eaf-browser-continue-where-left-off t)
+(setq eaf-browser-enable-adblocker t)
+(setq eaf-browser-default-search-engine "duckduckgo")
+(setq eaf-browse-blank-page-url "https://duckduckgo.com")
+(setq eaf-pdf-dark-mode "force")
+
+(setq browse-url-browser-function #'eaf-open-browser)
+(defalias 'browse-web #'eaf-open-browser)
+
+(keymap-global-set "C-c C-o"   #'eaf-open-url-at-point)
+(keymap-global-set "C-x C-j"   #'eaf-open-in-file-manager)
+(keymap-global-set "C-z C-z f" #'eaf-open)
+(keymap-global-set "C-z C-z u" #'eaf-open-browser)
+(keymap-global-set "C-z C-z h" #'eaf-open-browser-with-history)
+(keymap-global-set "C-z C-z s" #'eaf-search-it)
+(keymap-global-set "C-z C-z p" #'eaf-open-pdf-from-history)
