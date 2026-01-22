@@ -167,6 +167,8 @@
         (find-file (expand-file-name file))
       (user-error "No filename at point"))))
 
+(global-unset-key (kbd "C-z"))
+
 (keymap-global-set "C-v" #'scroll-half-page-up)
 (keymap-global-set "M-v" #'scroll-half-page-down)
 (keymap-global-set "C-x _" #'maximize-window)
@@ -225,6 +227,7 @@
   :config
   (setq ibuffer-saved-filter-groups
         '(("default"
+           ("Code" (derived-mode . prog-mode))
            ("EAF" (mode . eaf-mode))
            ("Org" (or (mode . org-mode)
                       (filename . "\\.org$")))
@@ -244,7 +247,6 @@
                         (name . "^\\*Warnings\\*$")
                         (name . "^\\*Completions\\*$")))
            ("Dired" (mode . dired-mode))
-           ("Code" (derived-mode . prog-mode))
            ("Magit" (name . "^\\*magit"))
            ("Process" (name . "^\\*"))
            )))
@@ -261,17 +263,85 @@
          ("C-c / n" . ibuffer-filter-by-name)
          ("C-c / f" . ibuffer-filter-by-filename)
          ("C-c / c" . ibuffer-clear-filter-groups)))
+
+(defun buffers-with-mode (mode)
+  (let* ((name (if (symbolp mode) (symbol-name mode) mode))
+         (mode-sym (intern (if (string-suffix-p "-mode" name)
+                               name
+                             (concat name "-mode"))))
+         (alt-sym  (intern (string-remove-suffix "-mode" name))))
+    (seq-filter
+     (lambda (buf)
+       (with-current-buffer buf
+         (or (derived-mode-p mode-sym alt-sym)
+             (and (boundp mode-sym) (symbol-value mode-sym))
+             (and (boundp alt-sym)  (symbol-value alt-sym)))))
+     (buffer-list))))
+
+(defun buffer-names-with-mode (mode)
+  (mapcar #'buffer-name (buffers-with-mode mode)))
+
+(defun switch-to-buffer-with-mode (mode)
+  (interactive)
+  (let* ((buffers (buffers-with-mode mode))
+         (names   (mapcar #'buffer-name buffers)))
+    (switch-to-buffer
+     (completing-read "Switch to buffer: " names nil t))))
+
+(defun my/mode-match-p (mode)
+  (let* ((s (if (symbolp mode) (symbol-name mode) (format "%s" mode)))
+         (pair (if (string-match "\\`\\(.+\\)-mode\\'" s)
+                   (cons (intern s) (intern (match-string 1 s)))
+                 (cons (intern (concat s "-mode")) (intern s))))
+         (m (car pair))
+         (alt (cdr pair)))
+    (or (derived-mode-p m alt)
+        (and (boundp m) (symbol-value m))
+        (and (boundp alt) (symbol-value alt)))))
+
+(defun my/candidate->buffer (cand)
+  (cond
+   ((bufferp cand) cand)
+   ((stringp cand) (get-buffer cand))
+   ((consp cand)
+    (or (my/candidate->buffer (cdr cand))
+        (my/candidate->buffer (car cand))))
+   (t nil)))
+
+(defun my/buffer-has-any-mode-p (buf modes)
+  (with-current-buffer buf
+    (catch 'hit
+      (dolist (m modes)
+        (when (my/mode-match-p m) (throw 'hit t)))
+      nil)))
+
+(defun my/switch-to-buffer-excluding-modes (excluded-modes)
+  (interactive)
+  (let* ((excluded (if (listp excluded-modes) excluded-modes (list excluded-modes)))
+         (pred (lambda (cand)
+                 (let ((buf (my/candidate->buffer cand)))
+                   (and buf (not (my/buffer-has-any-mode-p buf excluded)))))))
+    (switch-to-buffer
+     (read-buffer "Switch to buffer: " (other-buffer) t pred))))
+
+(keymap-global-set "C-z C-z b" (lambda () (interactive) (switch-to-buffer-with-mode 'eaf-mode)))
+(keymap-global-set "C-z b" (lambda () (interactive) (switch-to-buffer-with-mode 'prog-mode)))
+(keymap-global-set "C-x b" (lambda () (interactive) (my/switch-to-buffer-excluding-modes '(eaf-mode prog-mode))))
+
 ;; Term/Shell
 
 (use-package vterm
   :ensure t
-  :commands vterm)
+  :commands vterm
+  :hook (vterm-mode . (lambda () (display-line-numbers-mode -1)))
+  :bind (("C-c t" . vterm)))
 
 (use-package eshell
   :ensure nil
+  :hook (eshell-mode . (lambda () (display-line-numbers-mode -1)))
   :config
   (setq eshell-scroll-to-bottom-on-input 'all)
-  :bind (("C-c t" . eshell)))
+  :bind (("C-c e" . eshell)))
 
 ;; Undo tree
 
@@ -372,8 +442,9 @@
                     "--pch-storage=memory")))
   :bind
   (:map eglot-mode-map
-        ("C-c a" . eglot-code-actions)
-        ("C-c r" . eglot-rename)))
+        ("C-c l f" . eglot-format)
+        ("C-c l a" . eglot-code-actions)
+        ("C-c l r" . eglot-rename)))
 
 (use-package yasnippet
   :vc (:url "https://github.com/joaotavora/yasnippet"
@@ -433,71 +504,10 @@
   :vc (:url "https://github.com/copilot-emacs/copilot.el"
             :rev :newest
             :branch "main")
-  :bind
-  (:map copilot-completion-map
-        ("<tab>" . copilot-accept-completion)
-        ("TAB" . copilot-accept-completion)))
-
-;; (add-hook 'prog-mode-hook 'copilot-mode)
-
-;; Buffers
-
-(global-unset-key (kbd "C-z"))
-
-;; (use-package bufferlo
-;;   :ensure t
-;;   :init
-;;   (bufferlo-mode 1)
-;;   (setq bufferlo-bookmarks-auto-save-interval 600)    ; Auto-save every 10 minutes
-;;   (setq bufferlo-auto-update-delay 0.1)               ; Faster response time
-;;   (setq bufferlo-bookmarks-default-directory "~/.emacs.d/bufferlo/")
-;;   (setq bufferlo-menu-bar-show t)
-;;   (setq bufferlo-menu-bar-list-buffers 'ibuffer)
-;;   (setq bufferlo-prefer-local-buffers 'tabs)
-;;   (setq bufferlo-ibuffer-bind-local-buffer-filter t)
-;;   (setq bufferlo-ibuffer-bind-keys t)
-;;   :config
-;;   (bufferlo-mode 1)
-;;   (with-eval-after-load 'desktop
-;;     (add-hook 'desktop-after-read-hook 'bufferlo-desktop-restore))
-;;   :bind
-;;   ( ;; buffer / ibuffer
-;;    ("C-x b" . bufferlo-switch-to-buffer)
-;;    ("C-z C-b" . bufferlo-ibuffer)
-;;    ("C-z M-C-b" . bufferlo-ibuffer-orphans)
-;;    ("C-z b -" . bufferlo-remove)
-;;    ;; general bookmark (interactive)
-;;    ("C-z b l" . bufferlo-bms-load)
-;;    ("C-z b s" . bufferlo-bms-save)
-;;    ("C-z b c" . bufferlo-bms-close)
-;;    ("C-z b r" . bufferlo-bm-raise)
-;;    ;; dwim frame or tab bookmarks
-;;    ("C-z d s" . bufferlo-bm-save)
-;;    ("C-z d l" . bufferlo-bm-load)
-;;    ("C-z d 0" . bufferlo-bm-close)
-;;    ;; tabs
-;;    ("C-z t s" . bufferlo-bm-tab-save)
-;;    ("C-z t u" . bufferlo-bm-tab-save-curr)
-;;    ("C-z t l" . bufferlo-bm-tab-load)
-;;    ("C-z t r" . bufferlo-bm-tab-load-curr)
-;;    ("C-z t 0" . bufferlo-bm-tab-close-curr)
-;;    ;; frames
-;;    ("C-z f s" . bufferlo-bm-frame-save)
-;;    ("C-z f u" . bufferlo-bm-frame-save-curr)
-;;    ("C-z f l" . bufferlo-bm-frame-load)
-;;    ("C-z f r" . bufferlo-bm-frame-load-curr)
-;;    ("C-z f m" . bufferlo-bm-frame-load-merge)
-;;    ("C-z f 0" . bufferlo-bm-frame-close-curr)
-;;    ;; sets
-;;    ("C-z s s" . bufferlo-set-save)
-;;    ("C-z s u" . bufferlo-set-save-curr)
-;;    ("C-z s +" . bufferlo-set-add)
-;;    ("C-z s =" . bufferlo-set-add)
-;;    ("C-z s -" . bufferlo-set-remove)
-;;    ("C-z s l" . bufferlo-set-load)
-;;    ("C-z s 0" . bufferlo-set-close)
-;;    ("C-z s c" . bufferlo-set-clear)
-;;    ("C-z s L" . bufferlo-set-list)))
+  :bind (("C-c a c" . copilot-mode)
+         :map copilot-completion-map
+         ("<tab>" . copilot-accept-completion)
+         ("TAB" . copilot-accept-completion)))
 
 ;; Utils
 
@@ -530,15 +540,15 @@
 (require 'eaf-file-manager)
 (require 'eaf-pdf-viewer)
 
-(defun adviser-find-file (orig-fn file &rest args)
-  (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
-    (pcase (file-name-extension file)
-      ((or "pdf" "epub")
-       (funcall fn file))
-      (_
-       (apply orig-fn file args)))))
+;; (defun adviser-find-file (orig-fn file &rest args)
+;;   (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
+;;     (pcase (file-name-extension file)
+;;       ((or "pdf" "epub")
+;;        (funcall fn file))
+;;       (_
+;;        (apply orig-fn file args)))))
 
-(advice-add #'find-file :around #'adviser-find-file)
+;; (advice-add #'find-file :around #'adviser-find-file)
 
 (setq eaf-browser-translate-language "en")
 (setq eaf-browser-continue-where-left-off t)
@@ -551,7 +561,7 @@
 (defalias 'browse-web #'eaf-open-browser)
 
 (keymap-global-set "C-c C-o"   #'eaf-open-url-at-point)
-(keymap-global-set "C-x C-j"   #'eaf-open-in-file-manager)
+(keymap-global-set "C-z C-j"   #'eaf-open-in-file-manager)
 (keymap-global-set "C-z C-z f" #'eaf-open)
 (keymap-global-set "C-z C-z u" #'eaf-open-browser)
 (keymap-global-set "C-z C-z h" #'eaf-open-browser-with-history)
