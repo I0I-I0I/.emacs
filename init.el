@@ -215,6 +215,52 @@
     (add-to-list 'default-frame-alist '(background-color . "#000000"))
     (set-face-background 'default "#000000")))
 
+;; IBuffer
+
+(use-package ibuffer
+  :ensure nil
+  :hook (ibuffer-mode . (lambda ()
+                          (ibuffer-auto-mode 1)
+                          (ibuffer-switch-to-saved-filter-groups "default")))
+  :config
+  (setq ibuffer-saved-filter-groups
+        '(("default"
+           ("EAF" (mode . eaf-mode))
+           ("Org" (or (mode . org-mode)
+                      (filename . "\\.org$")))
+           ("Shell" (or (mode . eshell-mode)
+                        (mode . vterm-mode)
+                        (mode . shell-mode)
+                        (mode . term-mode)))
+           ("Emacs" (or (name . "^\\*scratch\\*$")
+                        (name . "^\\*Help\\*$")
+                        (name . "^\\*Buffer List\\*$")
+                        (name . "^\\*eaf\\*$")
+                        (name . "^\\*eaf-epc.*\\*$")
+                        (name . "^\\*Disabled command\\*$")
+                        (name . "^\\*Async-native-compile-log\\*$")
+                        (name . "^\\*Messages\\*$")
+                        (name . "^\\*Backtrace\\*$")
+                        (name . "^\\*Warnings\\*$")
+                        (name . "^\\*Completions\\*$")))
+           ("Dired" (mode . dired-mode))
+           ("Code" (derived-mode . prog-mode))
+           ("Magit" (name . "^\\*magit"))
+           ("Process" (name . "^\\*"))
+           )))
+
+  (setq ibuffer-show-empty-filter-groups nil)
+  (setq ibuffer-always-show-last-buffer nil)
+  (setq ibuffer-default-sorting-mode 'recency)
+  (setq ibuffer-human-readable-size t)
+
+  :bind (("C-x C-b" . ibuffer)
+         :map ibuffer-mode-map
+         ("g" . ibuffer-update)
+         ("/" . ibuffer-filter-by-mode)
+         ("C-c / n" . ibuffer-filter-by-name)
+         ("C-c / f" . ibuffer-filter-by-filename)
+         ("C-c / c" . ibuffer-clear-filter-groups)))
 ;; Term/Shell
 
 (use-package vterm
