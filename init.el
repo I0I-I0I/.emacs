@@ -8,6 +8,10 @@
 
 (setq custom-file "~/custom.el")
 
+(when (eq system-type 'windows-nt)
+  (setenv "HOME" (getenv "USERPROFILE"))
+  (setq default-directory (concat (getenv "HOME") "/")))
+
 (declare-function cape-keyword "cape")
 (declare-function ffap-file-at-point "ffap")
 
@@ -40,11 +44,6 @@
   (setq native-comp-deferred-compilation t))
 
 (setq use-package-verbose nil)
-
-(with-eval-after-load 'tramp
-  (setq tramp-ssh-controlmaster-options
-        "-o ControlMaster=auto -o ControlPath='~/.ssh/tramp-%%r@%%h:%%p' -o ControlPersist=60s")
-  (setq tramp-auto-save-directory (expand-file-name "tramp-autosave" user-emacs-directory)))
 
 (run-with-idle-timer 10 t #'garbage-collect)
 
@@ -333,13 +332,7 @@
 (keymap-set my/c-z-map "b" (lambda () (interactive) (switch-to-buffer-with-mode 'prog-mode)))
 ;; (keymap-global-set "C-x b" (lambda () (interactive) (my/switch-to-buffer-excluding-modes '(eaf-mode prog-mode))))
 
-;; Term/Shell
-
-(use-package vterm
-  :ensure t
-  :commands vterm
-  :hook (vterm-mode . (lambda () (display-line-numbers-mode -1)))
-  :bind (("C-c t" . vterm)))
+;; Eshell
 
 (use-package eshell
   :ensure nil
@@ -347,6 +340,11 @@
   :config
   (setq eshell-scroll-to-bottom-on-input 'all)
   :bind (("C-c e" . eshell)))
+
+(use-package eat
+  :ensure t
+  :commands (eat eat-eshell-mode)
+  :hook (eshell-mode . eat-eshell-mode))
 
 ;; Undo tree
 
@@ -462,19 +460,11 @@
 (use-package corfu
   :ensure t
   :init
-  (global-corfu-mode)
-  :config
-  (setq corfu-auto t
-        corfu-cycle t))
-
-(use-package corfu
-  :ensure t
-  :init
   (global-corfu-mode 1)
-  (setq corfu-auto nil
+  (setq corfu-auto t
         corfu-cycle t
-        corfu-echo-delay 1.0
-        corfu-popupinfo-delay 1.0))
+        corfu-echo-delay 0.1
+        corfu-popupinfo-delay 0.1))
 
 (use-package cape
   :ensure t
@@ -570,15 +560,10 @@
   (browse-url-browser-function #'eaf-open-browser)
   :config
   (require 'eaf-browser)
-  (require 'eaf-pdf-viewer)
-  (require 'eaf-image-viewer)
-  (require 'eaf-video-player)
-  (require 'eaf-terminal)
-  (require 'eaf-mindmap)
-  (require 'eaf-markmap)
   (require 'eaf-org-previewer)
+  (require 'eaf-image-viewer)
   (require 'eaf-markdown-previewer)
-  (require 'eaf-file-manager)
+  (require 'eaf-pdf-viewer)
 
   (defalias 'browse-web #'eaf-open-browser)
 
@@ -591,7 +576,6 @@
   (advice-add #'find-file :around #'adviser-find-file)
 
   (keymap-global-set "C-c C-o" #'eaf-open-url-at-point)
-  (keymap-set my/c-z-map "C-j"   #'eaf-open-in-file-manager)
   (keymap-set my/c-z-map "C-z f" #'eaf-open)
   (keymap-set my/c-z-map "C-z u" #'eaf-open-browser)
   (keymap-set my/c-z-map "C-z h" #'eaf-open-browser-with-history)
