@@ -53,7 +53,10 @@
       tab-bar-new-button-show nil)
 
 ;; Maple Mono 17
-(set-frame-font "FantasqueSansM Nerd Font 20" nil t)
+(set-frame-font (if (eq system-type 'gnu/linux)
+                    "FantasqueSansM Nerd Font 20"
+                  "FantasqueSansM Nerd Font 16")
+                nil t)
 
 (require 'grep)
 (setq grep-command "grep -nH --color=auto -r -e ")
@@ -168,6 +171,8 @@
       (user-error "No filename at point"))))
 
 (global-unset-key (kbd "C-z"))
+(defvar my/c-z-map (let ((m (make-sparse-keymap))) m))
+(keymap-global-set "C-z" my/c-z-map)
 
 (keymap-global-set "C-v" #'scroll-half-page-up)
 (keymap-global-set "M-v" #'scroll-half-page-down)
@@ -324,9 +329,9 @@
     (switch-to-buffer
      (read-buffer "Switch to buffer: " (other-buffer) t pred))))
 
-(keymap-global-set "C-z C-z b" (lambda () (interactive) (switch-to-buffer-with-mode 'eaf-mode)))
-(keymap-global-set "C-z b" (lambda () (interactive) (switch-to-buffer-with-mode 'prog-mode)))
-(keymap-global-set "C-x b" (lambda () (interactive) (my/switch-to-buffer-excluding-modes '(eaf-mode prog-mode))))
+(keymap-set my/c-z-map "C-z b" (lambda () (interactive) (switch-to-buffer-with-mode 'eaf-mode)))
+(keymap-set my/c-z-map "b" (lambda () (interactive) (switch-to-buffer-with-mode 'prog-mode)))
+;; (keymap-global-set "C-x b" (lambda () (interactive) (my/switch-to-buffer-excluding-modes '(eaf-mode prog-mode))))
 
 ;; Term/Shell
 
@@ -361,13 +366,13 @@
 (use-package magit
   :ensure t
   :commands (magit-status magit-dispatch)
-  :bind (("C-c g g" . magit-status)))
+  :bind (("C-z g g" . magit-status)))
 
 (use-package git-timemachine
   :vc (:url "https://codeberg.org/pidu/git-timemachine"
             :rev :newest
             :branch "master")
-  :bind (("C-c g t" . git-timemachine)))
+  :bind (("C-z g t" . git-timemachine)))
 
 ;; Expand region
 
@@ -500,14 +505,34 @@
 
 ;; AI
 
+;; M-x copilot-install-server
 (use-package copilot
   :vc (:url "https://github.com/copilot-emacs/copilot.el"
             :rev :newest
             :branch "main")
-  :bind (("C-c a c" . copilot-mode)
+  :bind (("C-z a a" . copilot-mode)
          :map copilot-completion-map
          ("<tab>" . copilot-accept-completion)
          ("TAB" . copilot-accept-completion)))
+
+(use-package agent-shell
+  :ensure t
+  :config
+  (setq agent-shell-preferred-agent-config
+        (agent-shell-openai-make-codex-config))
+  (setq agent-shell-openai-authentication
+        (agent-shell-openai-make-authentication :login t))
+  (setq agent-shell-openai-codex-command '("npx" "@zed-industries/codex-acp"))
+  :bind (("C-z a c" . agent-shell)))
+
+;; Zen mode
+
+(use-package sublimity
+  :ensure t
+  :config
+  (require 'sublimity-scroll)
+  (require 'sublimity-attractive)
+  :bind (("C-z z" . sublimity-mode)))
 
 ;; Utils
 
@@ -524,46 +549,51 @@
   :ensure t
   :config
   (setq mpvi-mpv-ontop-p t)
-  :bind (("C-c C-v" . mpvi-play)
-         ("C-c v s" . mpvi-speed)))
+  :bind (("C-z C-v" . mpvi-play)
+         ("C-z v s" . mpvi-speed)))
 
 ;; Other
 
-(add-to-list 'load-path "~/.emacs.d/site-lisp/emacs-application-framework/")
-(require 'eaf)
-(require 'eaf-browser)
-(require 'eaf-org-previewer)
-(require 'eaf-image-viewer)
-(require 'eaf-music-player)
-(require 'eaf-video-player)
-(require 'eaf-markdown-previewer)
-(require 'eaf-file-manager)
-(require 'eaf-pdf-viewer)
+;; Do not forget to run 'M-x eaf-install' after installation
+(use-package eaf
+  :vc (:url "https://github.com/emacs-eaf/emacs-application-framework"
+            :rev :newest
+            :branch "master")
+  :demand t
+  :custom
+  (eaf-browser-translate-language "en")
+  (eaf-browser-continue-where-left-off t)
+  (eaf-browser-enable-adblocker t)
+  (eaf-browser-default-search-engine "duckduckgo")
+  (eaf-browse-blank-page-url "https://duckduckgo.com")
+  (eaf-pdf-dark-mode "force")
+  (browse-url-browser-function #'eaf-open-browser)
+  :config
+  (require 'eaf-browser)
+  (require 'eaf-pdf-viewer)
+  (require 'eaf-image-viewer)
+  (require 'eaf-video-player)
+  (require 'eaf-terminal)
+  (require 'eaf-mindmap)
+  (require 'eaf-markmap)
+  (require 'eaf-org-previewer)
+  (require 'eaf-markdown-previewer)
+  (require 'eaf-file-manager)
 
-;; (defun adviser-find-file (orig-fn file &rest args)
-;;   (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
-;;     (pcase (file-name-extension file)
-;;       ((or "pdf" "epub")
-;;        (funcall fn file))
-;;       (_
-;;        (apply orig-fn file args)))))
+  (defalias 'browse-web #'eaf-open-browser)
 
-;; (advice-add #'find-file :around #'adviser-find-file)
+  (defun adviser-find-file (orig-fn file &rest args)
+    (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
+      (pcase (file-name-extension file)
+        ((or "pdf" "epub") (funcall fn file))
+        (_ (apply orig-fn file args)))))
 
-(setq eaf-browser-translate-language "en")
-(setq eaf-browser-continue-where-left-off t)
-(setq eaf-browser-enable-adblocker t)
-(setq eaf-browser-default-search-engine "duckduckgo")
-(setq eaf-browse-blank-page-url "https://duckduckgo.com")
-(setq eaf-pdf-dark-mode "force")
+  (advice-add #'find-file :around #'adviser-find-file)
 
-(setq browse-url-browser-function #'eaf-open-browser)
-(defalias 'browse-web #'eaf-open-browser)
-
-(keymap-global-set "C-c C-o"   #'eaf-open-url-at-point)
-(keymap-global-set "C-z C-j"   #'eaf-open-in-file-manager)
-(keymap-global-set "C-z C-z f" #'eaf-open)
-(keymap-global-set "C-z C-z u" #'eaf-open-browser)
-(keymap-global-set "C-z C-z h" #'eaf-open-browser-with-history)
-(keymap-global-set "C-z C-z s" #'eaf-search-it)
-(keymap-global-set "C-z C-z p" #'eaf-open-pdf-from-history)
+  (keymap-global-set "C-c C-o" #'eaf-open-url-at-point)
+  (keymap-set my/c-z-map "C-j"   #'eaf-open-in-file-manager)
+  (keymap-set my/c-z-map "C-z f" #'eaf-open)
+  (keymap-set my/c-z-map "C-z u" #'eaf-open-browser)
+  (keymap-set my/c-z-map "C-z h" #'eaf-open-browser-with-history)
+  (keymap-set my/c-z-map "C-z s" #'eaf-search-it)
+  (keymap-set my/c-z-map "C-z p" #'eaf-open-pdf-from-history))
