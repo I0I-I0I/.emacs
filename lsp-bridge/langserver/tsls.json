@@ -1,0 +1,10 @@
+{
+  "name": "tsls",
+  "languageId": "",
+  "command": ["typescript-language-server", "--stdio"],
+  "settings": {
+    "typescript.format.enable": false,
+    "javascript.format.enable": false
+  },
+  "support-single-file": true
+}

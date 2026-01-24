@@ -467,58 +467,37 @@
             :branch "master")
   :bind (("C-'" . avy-goto-word-1)))
 
+;; Treesitter
+
+(setq treesit-language-source-alist
+      '((bash "https://github.com/tree-sitter/tree-sitter-bash")
+        (cmake "https://github.com/uyha/tree-sitter-cmake")
+        (css "https://github.com/tree-sitter/tree-sitter-css")
+        (elisp "https://github.com/Wilfred/tree-sitter-elisp")
+        (go "https://github.com/tree-sitter/tree-sitter-go")
+        (html "https://github.com/tree-sitter/tree-sitter-html")
+        (javascript "https://github.com/tree-sitter/tree-sitter-javascript" "master" "src")
+        (json "https://github.com/tree-sitter/tree-sitter-json")
+        (make "https://github.com/alemuller/tree-sitter-make")
+        (markdown "https://github.com/ikatyang/tree-sitter-markdown")
+        (python "https://github.com/tree-sitter/tree-sitter-python")
+        (toml "https://github.com/tree-sitter/tree-sitter-toml")
+        (tsx "https://github.com/tree-sitter/tree-sitter-typescript" "master" "tsx/src")
+        (typescript "https://github.com/tree-sitter/tree-sitter-typescript" "master" "typescript/src")
+        (yaml "https://github.com/ikatyang/tree-sitter-yaml")))
+
+;; (mapc #'treesit-install-language-grammar (mapcar #'car treesit-language-source-alist))
+
+(setq major-mode-remap-alist
+      '((yaml-mode . yaml-ts-mode)
+        (bash-mode . bash-ts-mode)
+        (js2-mode . js-ts-mode)
+        (typescript-mode . typescript-ts-mode)
+        (json-mode . json-ts-mode)
+        (css-mode . css-ts-mode)
+        (python-mode . python-ts-mode)))
+
 ;; LSP
-(use-package eglot
-  :ensure t
-  :commands (eglot eglot-ensure)
-  :hook
-  ((python-mode . eglot-ensure)
-   (python-ts-mode . eglot-ensure)
-   (typescript-ts-mode . eglot-ensure)
-   (typescript-mode . eglot-ensure)
-   (js-mode . eglot-ensure)
-   (js2-mode . eglot-ensure)
-   (web-mode . eglot-ensure)
-   (html-mode . eglot-ensure)
-   (css-mode . eglot-ensure)
-   (c-mode . eglot-ensure)
-   (cpp-mode . eglot-ensure))
-  :config
-  ;; https://getzana.net/#download
-
-  ;; zana install \
-  ;; npm:vscode-langservers-extracted \
-  ;; npm:typescript-language-server \
-  ;; npm:typescript
-
-  ;; uv tool install ruff ty
-
-  (add-to-list 'eglot-server-programs
-               '((python-ts-mode python-mode)
-                 . ("rass" "--" "ty" "server" "--" "ruff" "server")))
-  (add-to-list 'eglot-server-programs
-               '((html-mode)
-                 . ("rass" "--" "vscode-html-language-server" "--stdio" "--" "biome" "lsp-proxy")))
-  (add-to-list 'eglot-server-programs
-               '((css-mode)
-                 . ("rass" "--" "vscode-css-language-server" "--stdio" "--" "biome" "lsp-proxy")))
-  (add-to-list 'eglot-server-programs
-               '((typescript-ts-mode typescript-mode js-mode js2-mode)
-                 . ("rass" "--" "typescript-language-server" "--stdio" "--" "biome" "lsp-proxy")))
-  (add-to-list 'eglot-server-programs
-               '((c-mode c-ts-mode c++-mode c++-ts-mode)
-                 . ("clangd"
-                    "--background-index"
-                    "--clang-tidy"
-                    "--completion-style=detailed"
-                    "--header-insertion=never"
-                    "--pch-storage=memory")))
-  :bind
-  (:map eglot-mode-map
-        ("C-c l f" . eglot-format)
-        ("C-c l a" . eglot-code-actions)
-        ("C-c l r" . eglot-rename)))
-
 (use-package yasnippet
   :vc (:url "https://github.com/joaotavora/yasnippet"
             :rev :newest
@@ -527,10 +506,77 @@
   :config
   (yas-global-mode 1))
 
+(use-package lsp-bridge
+  :vc (:url "https://github.com/manateelazycat/lsp-bridge"
+            :rev :newest
+            :branch "master")
+  :commands (lsp-bridge-mode)
+  :hook ((python-mode
+          python-ts-mode
+          js-ts-mode
+          tsx-ts-mode
+          typescript-ts-mode
+          javascript-mode
+          json-mode
+          css-mode
+          html-mode
+          web-mode
+          c-mode
+          cpp-mode) . lsp-bridge-mode)
+  :init
+  (global-lsp-bridge-mode)
+
+  (setq acm-enable-quick-access t          ;; allow quick select by 1..0
+        acm-enable-icon t                  ;; icons (nice-to-have)
+        acm-enable-doc t                   ;; popup docs
+        acm-enable-doc-markdown-render t   ;; better docs rendering (if available)
+        acm-doc-delay 0.2                  ;; like corfu-popupinfo-delay
+        acm-candidate-max-number 30        ;; similar to corfu candidate count
+        acm-candidate-match-function 'regexp-quote ;; conservative matching
+        acm-enable-search-words t          ;; improves filtering in many stacks
+        acm-backend-lsp-enable-auto-import t)
+
+  (setq lsp-bridge-enable-completion-in-minibuffer t)
+
+  (dolist (dir '("~/.bun/bin" "~/.local/share/zana/bin" "~/.local/bin"))
+    (let* ((path (expand-file-name dir))
+           (path-list (split-string (or (getenv "PATH") "") path-separator t)))
+      (when (file-directory-p path)
+        (unless (member path exec-path)
+          (setq exec-path (cons path exec-path)))
+        (unless (member path path-list)
+          (setenv "PATH" (concat path path-separator (getenv "PATH")))))))
+  (setq lsp-bridge-user-langserver-dir (expand-file-name "~/.emacs.d/lsp-bridge/langserver/"))
+  (setq lsp-bridge-user-multiserver-dir (expand-file-name "~/.emacs.d/lsp-bridge/multiserver/"))
+
+  (setq lsp-bridge-enable-hover-diagnostic nil
+        lsp-bridge-enable-signature-help t
+        lsp-bridge-enable-auto-format-code nil)
+  :config
+  (add-to-list 'lsp-bridge-multi-lang-server-extension-list '("py" . "ty_ruff"))
+  (dolist (ext '("ts" "tsx" "js" "jsx"))
+    (add-to-list 'lsp-bridge-multi-lang-server-extension-list (cons ext "tsls_oxlint_oxfmt")))
+
+  (defun my/lsp-bridge-xref-backend () 'lsp-bridge)
+  (add-hook 'lsp-bridge-mode-hook (lambda () (add-hook 'xref-backend-functions #'my/lsp-bridge-xref-backend nil t)))
+  (add-hook 'lsp-bridge-mode-hook (lambda () (corfu-mode -1)))
+
+  :bind (:map lsp-bridge-mode-map
+              ("M-."   . lsp-bridge-find-def)
+              ("M-,"   . lsp-bridge-find-def-return)
+              ("M-?"   . lsp-bridge-find-references)
+              ("C-h ." . lsp-bridge-popup-documentation)
+              ("C-c l s" . lsp-bridge-workspace-list-symbols)
+              ("C-c l r" . lsp-bridge-rename)
+              ("C-c l a" . lsp-bridge-code-action)
+              ("C-c l d" . lsp-bridge-diagnostics-list)
+              ("C-c l f" . lsp-bridge-format-buffer)))
+
 (use-package corfu
   :ensure t
+  ;; :hook ((eshell-mode . corfu-mode))
   :init
-  (global-corfu-mode 1)
+  (global-corfu-mode)
   :custom
   (setq corfu-auto-trigger ".")
   (corfu-auto t)

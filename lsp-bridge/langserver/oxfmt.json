@@ -1,0 +1,7 @@
+{
+  "name": "oxfmt",
+  "languageId": "",
+  "command": ["oxfmt", "--lsp"],
+  "settings": {},
+  "support-single-file": false
+}

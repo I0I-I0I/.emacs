@@ -1,0 +1,7 @@
+{
+  "name": "biome",
+  "languageId": "",
+  "command": ["biome", "lsp-proxy", "--stdio"],
+  "settings": {},
+  "support-single-file": false
+}

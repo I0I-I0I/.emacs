@@ -1,0 +1,7 @@
+{
+  "name": "oxlint",
+  "languageId": "",
+  "command": ["oxlint", "--lsp"],
+  "settings": {},
+  "support-single-file": false
+}

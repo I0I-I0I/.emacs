@@ -1,0 +1,7 @@
+{
+  "name": "ty",
+  "languageId": "python",
+  "command": ["ty", "server"],
+  "settings": {},
+  "support-single-file": false
+}
