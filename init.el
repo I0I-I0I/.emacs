@@ -8,23 +8,30 @@
 
 ;; Font
 (when (display-graphic-p)
-  (when (find-font (font-spec :family "Maple Mono NF"))
+  (when (or (find-font (font-spec :family "Maple Mono"))
+            (find-font (font-spec :family "Maple Mono NF")))
     (set-frame-font
      (pcase system-type
-       ('windows-nt "Maple Mono NF-16")
-       ('gnu/linux  "Maple Mono NF-20"))
+       ('windows-nt "Maple Mono-16")
+       ('gnu/linux  "Maple Mono-18"))
      t t)))
 
 ;; windows specific
 (when (eq system-type 'windows-nt)
-  (prefer-coding-system 'utf-8-unix)
-  (setq default-process-coding-system '(utf-8-unix . utf-8-unix))
-  (set-selection-coding-system 'utf-16-le)
-  (set-clipboard-coding-system 'utf-16-le)
   (setenv "PATH"
           (concat "C:/Program Files/Git/usr/bin;"
                   (getenv "PATH")))
   (add-to-list 'exec-path "C:/Program Files/Git/usr/bin"))
+
+;; Fix encoding
+(defun my/revert-buffer-utf8 ()
+  "Revert current buffer using UTF-8 (unix) without confirmation."
+  (interactive)
+  (let ((coding-system-for-read 'utf-8-unix)
+        (coding-system-for-write 'utf-8-unix))
+    (revert-buffer :ignore-auto :noconfirm)))
+
+(global-set-key (kbd "C-c u") #'my/revert-buffer-utf8)
 
 ;; Package and use-package
 (require 'package)
@@ -52,9 +59,7 @@
   :init
   (setq gc-cons-threshold (* 256 1024 1024)
         gc-cons-percentage 0.6
-        read-process-output-max (* 4 1024 1024)
-        comp-async-jobs-number 8
-        comp-deferred-compilation t)
+        read-process-output-max (* 4 1024 1024))
 
   (add-hook 'emacs-startup-hook
             (lambda ()
@@ -118,7 +123,7 @@
     (interactive)
     (scroll-up (/ (window-body-height) 2)))
 
-  ;; Editing helpers
+  ;; Move text
   (defun move-text-internal (arg)
     (cond
      ((and mark-active transient-mark-mode)
@@ -159,6 +164,7 @@
       (if file
           (find-file (expand-file-name file))
         (user-error "No filename at point"))))
+
   (define-prefix-command 'my/c-z-map)
   (global-set-key (kbd "C-z") my/c-z-map)
   :bind
@@ -204,7 +210,7 @@
   :custom
   (completion-styles '(basic flex))
   (completions-format 'one-column)
-  (completions-max-height 15)
+  (completions-max-height 30)
   (completions-sort 'historical)
   (completion-auto-select nil)
   (completions-detailed t)
@@ -254,8 +260,8 @@
   (lambda-line-gui-ro-symbol  " ×")
   (lambda-line-gui-mod-symbol " ●")
   (lambda-line-gui-rw-symbol  " ◯")
-  (lambda-line-space-top +.50)
-  (lambda-line-space-bottom -.50)
+  (lambda-line-space-top +.30)
+  (lambda-line-space-bottom -.30)
   (lambda-line-symbol-position 0)
   :config
   (lambda-line-mode))
@@ -304,71 +310,6 @@
          ("C-c / n" . ibuffer-filter-by-name)
          ("C-c / f" . ibuffer-filter-by-filename)
          ("C-c / c" . ibuffer-clear-filter-groups)))
-
-;; Buffer helpers
-(defun buffers-with-mode (mode)
-  (let* ((name (if (symbolp mode) (symbol-name mode) mode))
-         (mode-sym (intern (if (string-suffix-p "-mode" name)
-                               name
-                             (concat name "-mode"))))
-         (alt-sym  (intern (string-remove-suffix "-mode" name))))
-    (seq-filter
-     (lambda (buf)
-       (with-current-buffer buf
-         (or (derived-mode-p mode-sym alt-sym)
-             (and (boundp mode-sym) (symbol-value mode-sym))
-             (and (boundp alt-sym)  (symbol-value alt-sym)))))
-     (buffer-list))))
-
-(defun buffer-names-with-mode (mode)
-  (mapcar #'buffer-name (buffers-with-mode mode)))
-
-(defun switch-to-buffer-with-mode (mode)
-  (interactive)
-  (let* ((buffers (buffers-with-mode mode))
-         (names   (mapcar #'buffer-name buffers)))
-    (switch-to-buffer
-     (completing-read "Switch to buffer: " names nil t))))
-
-(defun my/mode-match-p (mode)
-  (let* ((s (if (symbolp mode) (symbol-name mode) (format "%s" mode)))
-         (pair (if (string-match "\\`\\(.+\\)-mode\\'" s)
-                   (cons (intern s) (intern (match-string 1 s)))
-                 (cons (intern (concat s "-mode")) (intern s))))
-         (m (car pair))
-         (alt (cdr pair)))
-    (or (derived-mode-p m alt)
-        (and (boundp m) (symbol-value m))
-        (and (boundp alt) (symbol-value alt)))))
-
-(defun my/candidate->buffer (cand)
-  (cond
-   ((bufferp cand) cand)
-   ((stringp cand) (get-buffer cand))
-   ((consp cand)
-    (or (my/candidate->buffer (cdr cand))
-        (my/candidate->buffer (car cand))))
-   (t nil)))
-
-(defun my/buffer-has-any-mode-p (buf modes)
-  (with-current-buffer buf
-    (catch 'hit
-      (dolist (m modes)
-        (when (my/mode-match-p m) (throw 'hit t)))
-      nil)))
-
-(defun my/switch-to-buffer-excluding-modes (excluded-modes)
-  (interactive)
-  (let* ((excluded (if (listp excluded-modes) excluded-modes (list excluded-modes)))
-         (pred (lambda (cand)
-                 (let ((buf (my/candidate->buffer cand)))
-                   (and buf (not (my/buffer-has-any-mode-p buf excluded)))))))
-    (switch-to-buffer
-     (read-buffer "Switch to buffer: " (other-buffer) t pred))))
-
-(keymap-set my/c-z-map "C-z b" (lambda () (interactive) (switch-to-buffer-with-mode 'eaf-mode)))
-(keymap-set my/c-z-map "b" (lambda () (interactive) (switch-to-buffer-with-mode 'prog-mode)))
-(keymap-set my/c-z-map "e" (lambda () (interactive) (switch-to-buffer-with-mode 'eshell-mode)))
 
 ;; Eshell
 (use-package eshell
@@ -524,51 +465,42 @@
         (python-mode . python-ts-mode)))
 
 ;; LSP
-(use-package yasnippet
-  :vc (:url "https://github.com/joaotavora/yasnippet"
-            :rev :newest
-            :branch "master")
-  :ensure t
-  :config
-  (yas-global-mode 1))
-
-(use-package cape
-  :ensure t
-  :init
-  (add-to-list 'completion-at-point-functions #'cape-file)
-  (add-to-list 'completion-at-point-functions #'cape-dabbrev)
-  (add-to-list 'completion-at-point-functions #'cape-keyword)
-  (add-hook 'completion-at-point-functions #'cape-elisp-block))
-
 (use-package lsp-bridge
   :vc (:url "https://github.com/manateelazycat/lsp-bridge"
             :rev :newest
             :branch "master")
-  :commands (lsp-bridge-mode)
-  :hook ((python-mode
-          python-ts-mode
-          js-ts-mode
-          tsx-ts-mode
-          typescript-ts-mode
-          javascript-mode
-          json-mode
-          css-mode
-          html-mode
-          web-mode
-          c-mode
-          cpp-mode) . lsp-bridge-mode)
+  :demand t
   :init
-  (setq acm-enable-codeium t)
-  ;; (setq acm-enable-icon nil
-  ;;       acm-enable-capf t
-  ;;       acm-enable-search-file-words t
-  ;;       acm-enable-yas t
-  ;;       acm-enable-doc t
-  ;;       acm-enable-doc-markdown-render t
-  ;;       acm-doc-delay 0.2
-  ;;       acm-candidate-match-function 'regexp-quote
-  ;;       acm-enable-search-words t
-  ;;       acm-backend-lsp-enable-auto-import t)
+  (use-package markdown-mode
+    :ensure t)
+
+  (use-package yasnippet
+    :vc (:url "https://github.com/joaotavora/yasnippet"
+              :rev :newest
+              :branch "master")
+    :ensure t
+    :config
+    (yas-global-mode 1))
+
+  (use-package cape
+    :ensure t
+    :init
+    (add-to-list 'completion-at-point-functions #'cape-file)
+    (add-to-list 'completion-at-point-functions #'cape-dabbrev)
+    (add-to-list 'completion-at-point-functions #'cape-keyword)
+    (add-hook 'completion-at-point-functions #'cape-elisp-block))
+
+  (setq acm-enable-quick-access nil
+        acm-enable-icon nil
+        acm-enable-capf t
+        acm-enable-path t
+        acm-enable-search-file-words t
+        acm-enable-yas t
+        acm-enable-doc t
+        acm-enable-doc-markdown-render t
+        acm-enable-lsp-workspace-symbol t
+        acm-candidate-match-function 'regexp-quote
+        acm-backend-lsp-enable-auto-import t)
 
   (dolist (dir '("~/.bun/bin" "~/.local/bin"))
     (let* ((path (expand-file-name dir))
@@ -581,21 +513,17 @@
   (setq lsp-bridge-user-langserver-dir (expand-file-name "~/.emacs.d/lsp-bridge/langserver/"))
   (setq lsp-bridge-user-multiserver-dir (expand-file-name "~/.emacs.d/lsp-bridge/multiserver/"))
 
-  ;; (setq lsp-bridge-enable-hover-diagnostic nil
-  ;;       lsp-bridge-enable-signature-help t
-  ;;       lsp-bridge-enable-auto-format-code nil)
+  (setq lsp-bridge-enable-hover-diagnostic nil
+        lsp-bridge-enable-signature-help t
+        lsp-bridge-enable-auto-format-code nil)
   :config
   (add-to-list 'lsp-bridge-multi-lang-server-extension-list '("py" . "ty_ruff"))
   (dolist (ext '("ts" "tsx" "js" "jsx"))
     (add-to-list 'lsp-bridge-multi-lang-server-extension-list (cons ext "tsls_oxlint_oxfmt")))
 
-  ;; (defun my/lsp-bridge-xref-backend () 'lsp-bridge)
-  ;; (add-hook 'lsp-bridge-mode-hook (lambda () (add-hook 'xref-backend-functions #'my/lsp-bridge-xref-backend nil t)))
+  (defun my/lsp-bridge-xref-backend () 'lsp-bridge)
+  (add-hook 'lsp-bridge-mode-hook (lambda () (add-hook 'xref-backend-functions #'my/lsp-bridge-xref-backend nil t)))
   (global-lsp-bridge-mode)
-  ;; (add-hook 'lsp-bridge-mode-hook
-  ;;           (lambda ()
-  ;;             (when (fboundp 'corfu-mode)
-  ;;               (corfu-mode -1))))
   :bind (:map lsp-bridge-mode-map
               ("M-."   . lsp-bridge-find-def)
               ("M-,"   . lsp-bridge-find-def-return)
@@ -606,16 +534,6 @@
               ("C-c l a" . lsp-bridge-code-action)
               ("C-c l d" . lsp-bridge-diagnostics-list)
               ("C-c l f" . lsp-bridge-format-buffer)))
-
-;; (use-package corfu
-;;   :ensure t
-;;   :init
-;;   (global-corfu-mode)
-;;   :custom
-;;   (corfu-auto t)
-;;   (corfu-cycle t)
-;;   (corfu-echo-delay 0.2)
-;;   (corfu-popupinfo-delay 0.2))
 
 (use-package emmet-mode
   :ensure t
@@ -656,6 +574,30 @@
   (require 'sublimity-attractive)
   :bind (("C-z z" . sublimity-mode)))
 
+;; Dirvish
+(use-package dirvish
+  :ensure t
+  :init
+  (use-package dired
+    :ensure nil
+    :hook (dired-mode . dired-omit-mode)
+    :custom (dired-omit-files (rx string-start (or "." "..") string-end)))
+
+  (dirvish-override-dired-mode)
+  :hook
+  (dired-mode . (lambda () (display-line-numbers-mode -1)))
+  :custom
+  (dirvish-attributes '(vc-state subtree-state collapse git-msg file-size file-time))
+  (dirvish-preview-dispatchers '(image video audio archive pdf))
+  (dired-listing-switches "-alh --group-directories-first")
+  :config
+  (dirvish-side-follow-mode)
+  :bind (:map dirvish-mode-map
+              ("TAB" . dirvish-subtree-toggle)
+              ("h" . dired-up-directory)
+              ("l" . dired-find-file)
+              ("<backtab>" . dirvish-layout-toggle)))
+
 ;; Media
 (use-package emms
   :ensure t)
@@ -668,39 +610,38 @@
          ("C-z v s" . mpvi-speed)))
 
 ;; EAF
-;; (use-package eaf
-;;   :vc (:url "https://github.com/emacs-eaf/emacs-application-framework"
-;;             :rev :newest
-;;             :branch "master")
-;;   :demand t
-;;   :custom
-;;   (eaf-browser-translate-language "en")
-;;   (eaf-browser-continue-where-left-off t)
-;;   (eaf-browser-enable-adblocker t)
-;;   (eaf-browser-default-search-engine "duckduckgo")
-;;   (eaf-browse-blank-page-url "https://duckduckgo.com")
-;;   (eaf-pdf-dark-mode "force")
-;;   (browse-url-browser-function #'eaf-open-browser)
-;;   :config
-;;   (require 'eaf-browser)
-;;   (require 'eaf-org-previewer)
-;;   (require 'eaf-image-viewer)
-;;   (require 'eaf-markdown-previewer)
-;;   (require 'eaf-pdf-viewer)
+(use-package eaf
+  :vc (:url "https://github.com/emacs-eaf/emacs-application-framework"
+            :rev :newest
+            :branch "master")
+  :demand t
+  :custom
+  (eaf-browser-translate-language "en")
+  (eaf-browser-continue-where-left-off t)
+  (eaf-browser-enable-adblocker t)
+  (eaf-browser-default-search-engine "duckduckgo")
+  (eaf-browse-blank-page-url "https://duckduckgo.com")
+  (eaf-pdf-dark-mode "force")
+  (browse-url-browser-function #'eaf-open-browser)
+  :config
+  (require 'eaf-browser)
+  (require 'eaf-org-previewer)
+  (require 'eaf-markdown-previewer)
+  (require 'eaf-pdf-viewer)
 
-;;   (defalias 'browse-web #'eaf-open-browser)
+  (defalias 'browse-web #'eaf-open-browser)
 
-;;   (defun adviser-find-file (orig-fn file &rest args)
-;;     (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
-;;       (pcase (file-name-extension file)
-;;         ((or "pdf" "epub") (funcall fn file))
-;;         (_ (apply orig-fn file args)))))
+  (defun adviser-find-file (orig-fn file &rest args)
+    (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
+      (pcase (file-name-extension file)
+        ((or "pdf" "epub") (funcall fn file))
+        (_ (apply orig-fn file args)))))
 
-;;   (advice-add #'find-file :around #'adviser-find-file)
+  (advice-add #'find-file :around #'adviser-find-file)
 
-;;   (keymap-global-set "C-c C-o" #'eaf-open-url-at-point)
-;;   (keymap-set my/c-z-map "C-z f" #'eaf-open)
-;;   (keymap-set my/c-z-map "C-z u" #'eaf-open-browser)
-;;   (keymap-set my/c-z-map "C-z h" #'eaf-open-browser-with-history)
-;;   (keymap-set my/c-z-map "C-z s" #'eaf-search-it)
-;;   (keymap-set my/c-z-map "C-z p" #'eaf-open-pdf-from-history))
+  (keymap-global-set "C-c C-o" #'eaf-open-url-at-point)
+  (keymap-set my/c-z-map "C-z f" #'eaf-open)
+  (keymap-set my/c-z-map "C-z u" #'eaf-open-browser)
+  (keymap-set my/c-z-map "C-z h" #'eaf-open-browser-with-history)
+  (keymap-set my/c-z-map "C-z s" #'eaf-search-it)
+  (keymap-set my/c-z-map "C-z p" #'eaf-open-pdf-from-history))
