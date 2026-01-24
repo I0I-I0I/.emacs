@@ -1,35 +1,54 @@
-;; git clone https://git.savannah.gnu.org/git/emacs.git
-;; cd emacs
-;; git checkout emacs-30.2
-;; ./autogen.sh
-;; ./configure --prefix=/usr/local --with-x --with-x-toolkit=gtk3 --without-pgtk --with-native-compilation --with-tree-sitter --with-modules --with-cairo --with-imagemagick --with-xft
-;; make -j$(nproc)
-;; sudo make install
-
 (setq custom-file (expand-file-name "custom.el" user-emacs-directory))
-
-(when (eq system-type 'windows-nt)
-  (setenv "HOME" (getenv "USERPROFILE"))
-  (setq default-directory (file-name-as-directory (getenv "HOME"))))
-
-(when (display-graphic-p)
-  (let ((font (if (eq system-type 'gnu/linux)
-                  "FantasqueSansM Nerd Font 20"
-                "FantasqueSansM Nerd Font 16")))
-    (when (find-font (font-spec :name font))
-      (set-frame-font font nil t))))
-
-(declare-function cape-keyword "cape")
-(declare-function ffap-file-at-point "ffap")
+                                        ; (load custom-file 'noerror 'nomessage)
 
 (push '(fullscreen . maximized) default-frame-alist)
 
 (defvar my/gc-cons-threshold-orig gc-cons-threshold)
 (defvar my/gc-cons-percentage-orig gc-cons-percentage)
 
+;; Font
+(when (display-graphic-p)
+  (when (find-font (font-spec :family "Maple Mono NF"))
+    (set-frame-font
+     (pcase system-type
+       ('windows-nt "Maple Mono NF-16")
+       ('gnu/linux  "Maple Mono NF-20"))
+     t t)))
+
+;; windows specific
+(when (eq system-type 'windows-nt)
+  (prefer-coding-system 'utf-8-unix)
+  (setq default-process-coding-system '(utf-8-unix . utf-8-unix))
+  (set-selection-coding-system 'utf-16-le)
+  (set-clipboard-coding-system 'utf-16-le)
+  (setenv "PATH"
+          (concat "C:/Program Files/Git/usr/bin;"
+                  (getenv "PATH")))
+  (add-to-list 'exec-path "C:/Program Files/Git/usr/bin"))
+
+;; Package and use-package
+(require 'package)
+
+(setq package-archives
+      '(("gnu"    . "https://elpa.gnu.org/packages/")
+        ("nongnu" . "https://elpa.nongnu.org/nongnu/")
+        ("melpa"  . "https://melpa.org/packages/")))
+
+(package-initialize)
+(unless package-archive-contents
+  (package-refresh-contents))
+
+(unless (package-installed-p 'use-package)
+  (package-install 'use-package))
+
+(require 'use-package)
+(setq use-package-always-ensure t
+      use-package-verbose nil)
+
 ;; Core
 (use-package emacs
   :ensure nil
+  :demand t
   :init
   (setq gc-cons-threshold (* 256 1024 1024)
         gc-cons-percentage 0.6
@@ -86,13 +105,87 @@
   (savehist-mode 1)
 
   (custom-set-variables
-   '(uniquify-buffer-name-style (quote post-forward) nil (uniquify))))
+   '(uniquify-buffer-name-style (quote post-forward) nil (uniquify)))
+
+  ;; Navigation
+  (defun scroll-half-page-down ()
+    "scroll down half the page"
+    (interactive)
+    (scroll-down (/ (window-body-height) 2)))
+
+  (defun scroll-half-page-up ()
+    "scroll up half the page"
+    (interactive)
+    (scroll-up (/ (window-body-height) 2)))
+
+  ;; Editing helpers
+  (defun move-text-internal (arg)
+    (cond
+     ((and mark-active transient-mark-mode)
+      (if (> (point) (mark))
+          (exchange-point-and-mark))
+      (let ((column (current-column))
+            (text (delete-and-extract-region (point) (mark))))
+        (forward-line arg)
+        (move-to-column column t)
+        (set-mark (point))
+        (insert text)
+        (exchange-point-and-mark)
+        (setq deactivate-mark nil)))
+     (t
+      (beginning-of-line)
+      (when (or (> arg 0) (not (bobp)))
+        (forward-line)
+        (when (or (< arg 0) (not (eobp)))
+          (transpose-lines arg))
+        (forward-line -1)))))
+
+  (defun move-text-down (arg)
+    "Move region (transient-mark-mode active) or current line arg lines down."
+    (interactive "*p")
+    (move-text-internal arg))
+
+  (defun move-text-up (arg)
+    "Move region (transient-mark-mode active) or current line arg lines up."
+    (interactive "*p")
+    (move-text-internal (- arg)))
+
+  ;; Files
+  (defun open-file-at-point ()
+    "Open the file name at point. Supports ~/ and ./ paths."
+    (interactive)
+    (require 'ffap)
+    (let ((file (or (ffap-file-at-point) (thing-at-point 'filename t))))
+      (if file
+          (find-file (expand-file-name file))
+        (user-error "No filename at point"))))
+  (define-prefix-command 'my/c-z-map)
+  (global-set-key (kbd "C-z") my/c-z-map)
+  :bind
+  (("C-z" . my/c-z-map)
+   ("C-v" . scroll-half-page-up)
+   ("M-v" . scroll-half-page-down)
+   ("C-x _" . maximize-window)
+   ("C-c c" . project-compile)
+   ("C-c C" . compile)
+   ("C-c C-b" . grep)
+   ("C-c C-l" . (lambda () (interactive) (duplicate-line) (next-line)))
+   ("C-c o" . open-file-at-point)
+   ("C-c C-o" . browse-url-at-point)
+   ("M-p" . move-text-up)
+   ("M-n" . move-text-down)))
 
 ;; Grep
 (use-package grep
   :ensure nil
   :custom
   (grep-command "grep -nH --color=auto -r -e "))
+
+(use-package rg
+  :ensure t
+  :config
+  (rg-enable-default-bindings)
+  (rg-enable-menu))
 
 ;; Whitespace
 (use-package whitespace
@@ -118,97 +211,6 @@
   (completions-highlight-face 'completions-highlight)
   (completion-auto-help 'visible))
 
-;; Navigation
-(defun scroll-half-page-down ()
-  "scroll down half the page"
-  (interactive)
-  (scroll-down (/ (window-body-height) 2)))
-
-(defun scroll-half-page-up ()
-  "scroll up half the page"
-  (interactive)
-  (scroll-up (/ (window-body-height) 2)))
-
-;; Editing helpers
-(defun move-text-internal (arg)
-  (cond
-   ((and mark-active transient-mark-mode)
-    (if (> (point) (mark))
-        (exchange-point-and-mark))
-    (let ((column (current-column))
-          (text (delete-and-extract-region (point) (mark))))
-      (forward-line arg)
-      (move-to-column column t)
-      (set-mark (point))
-      (insert text)
-      (exchange-point-and-mark)
-      (setq deactivate-mark nil)))
-   (t
-    (beginning-of-line)
-    (when (or (> arg 0) (not (bobp)))
-      (forward-line)
-      (when (or (< arg 0) (not (eobp)))
-        (transpose-lines arg))
-      (forward-line -1)))))
-
-(defun move-text-down (arg)
-  "Move region (transient-mark-mode active) or current line
-  arg lines down."
-  (interactive "*p")
-  (move-text-internal arg))
-
-(defun move-text-up (arg)
-  "Move region (transient-mark-mode active) or current line
-  arg lines up."
-  (interactive "*p")
-  (move-text-internal (- arg)))
-
-;; Files
-(defun open-file-at-point ()
-  "Open the file name at point. Supports ~/ and ./ paths."
-  (interactive)
-  (require 'ffap)
-  (let ((file (or (ffap-file-at-point) (thing-at-point 'filename t))))
-    (if file
-        (find-file (expand-file-name file))
-      (user-error "No filename at point"))))
-
-;; Keymaps
-(global-unset-key (kbd "C-z"))
-(defvar my/c-z-map (let ((m (make-sparse-keymap))) m))
-(keymap-global-set "C-z" my/c-z-map)
-
-(keymap-global-set "C-v" #'scroll-half-page-up)
-(keymap-global-set "M-v" #'scroll-half-page-down)
-(keymap-global-set "C-x _" #'maximize-window)
-(keymap-global-set "C-c c" #'project-compile)
-(keymap-global-set "C-c C" #'compile)
-(keymap-global-set "C-c C-b" #'grep)
-(keymap-global-set "C-c C-l" (lambda () (interactive) (duplicate-line) (next-line)))
-(keymap-global-set "C-c o" #'open-file-at-point)
-(keymap-global-set "C-c C-o" #'browse-url-at-point)
-(keymap-global-set "M-p" #'move-text-up)
-(keymap-global-set "M-n" #'move-text-down)
-
-;; Packages
-(use-package package
-  :ensure nil
-  :init
-  (setq package-archives
-        '(("gnu"   . "https://elpa.gnu.org/packages/")
-          ("nongnu" . "https://elpa.nongnu.org/nongnu/")
-          ("melpa" . "https://melpa.org/packages/")))
-  (package-initialize)
-  (unless package-archive-contents
-    (package-refresh-contents)))
-
-(use-package use-package
-  :ensure t
-  :config
-  (setq use-package-verbose nil)
-  :custom
-  (use-package-always-ensure t))
-
 (use-package which-key
   :ensure t
   :config
@@ -219,26 +221,44 @@
   :config
   (editorconfig-mode 1))
 
-;; Theme
-(use-package almost-mono-themes
-  :ensure t
+;; Theme/UI
+(use-package lambda-themes
+  :vc (:url "https://github.com/Lambda-Emacs/lambda-themes"
+            :rev :newest
+            :branch "main")
+  :demand t
+  :init
+  (add-to-list 'custom-theme-load-path
+               (file-name-directory (locate-library "lambda-themes")))
   :config
-  (add-to-list 'default-frame-alist '(undecorated . t))
-  (load-theme 'almost-mono-black t)
-  (setq frame-background-mode 'light)
-  (when (memq 'almost-mono-black custom-enabled-themes)
-    (custom-set-faces
-     '(line-number ((t (:foreground "#3a3f5a" :background nil))))
-     '(line-number-current-line ((t (:foreground "#c5c9c5" :background nil :weight bold))))
-     '(tab-bar ((t (:background "#000000" :foreground "#c0caf5" :box nil))))
-     '(tab-bar-tab ((t (:background "#222222" :foreground "#c5c9c5" :weight bold))))
-     '(tab-bar-tab-inactive ((t (:background nil :foreground "#565f89" :box nil)))))
-    (setq frame-background-mode 'dark)
-    (when (display-graphic-p)
-      (set-frame-parameter nil 'alpha-background 70)
-      (add-to-list 'default-frame-alist '(alpha-background . 70))
-      (add-to-list 'default-frame-alist '(background-color . "#000000"))
-      (set-face-background 'default "#000000"))))
+  (setq lambda-themes-set-italic-comments t
+        lambda-themes-set-italic-keywords t
+        lambda-themes-set-variable-pitch t)
+  (load-theme 'lambda-dark t))
+
+(use-package lambda-line
+  :vc (:url "https://github.com/Lambda-Emacs/lambda-line"
+            :rev :newest
+            :branch "main")
+  :after lambda-themes
+  :custom
+  (lambda-line-icon-time t)
+  (lambda-line-clockface-update-fontset "ClockFaceRect")
+  (lambda-line-position 'bottom)
+  (lambda-line-abbrev t)
+  (lambda-line-prefix t)
+  (lambda-line-hspace "  ")
+  (lambda-line-prefix-padding nil)
+  (lambda-line-status-invert nil)
+  (lambda-line-vc-symbol " ±")
+  (lambda-line-gui-ro-symbol  " ×")
+  (lambda-line-gui-mod-symbol " ●")
+  (lambda-line-gui-rw-symbol  " ◯")
+  (lambda-line-space-top +.50)
+  (lambda-line-space-bottom -.50)
+  (lambda-line-symbol-position 0)
+  :config
+  (lambda-line-mode))
 
 ;; IBuffer
 (use-package ibuffer
@@ -435,7 +455,12 @@
 (use-package magit
   :ensure t
   :commands (magit-status magit-dispatch)
-  :bind (("C-z g g" . magit-status)))
+  :bind (("C-z g g" . magit-status))
+  :custom
+  (magit-process-connection-type nil)
+  :config
+  (when (eq system-type 'windows-nt)
+    (setq magit-git-executable "C:/Program Files/Git/bin/git.exe")))
 
 (use-package git-timemachine
   :vc (:url "https://codeberg.org/pidu/git-timemachine"
@@ -468,7 +493,6 @@
   :bind (("C-'" . avy-goto-word-1)))
 
 ;; Treesitter
-
 (setq treesit-language-source-alist
       '((bash "https://github.com/tree-sitter/tree-sitter-bash")
         (cmake "https://github.com/uyha/tree-sitter-cmake")
@@ -486,7 +510,9 @@
         (typescript "https://github.com/tree-sitter/tree-sitter-typescript" "master" "typescript/src")
         (yaml "https://github.com/ikatyang/tree-sitter-yaml")))
 
-;; (mapc #'treesit-install-language-grammar (mapcar #'car treesit-language-source-alist))
+(defun my/treesit-install ()
+  (interactive)
+  (mapc #'treesit-install-language-grammar (mapcar #'car treesit-language-source-alist)))
 
 (setq major-mode-remap-alist
       '((yaml-mode . yaml-ts-mode)
@@ -506,6 +532,14 @@
   :config
   (yas-global-mode 1))
 
+(use-package cape
+  :ensure t
+  :init
+  (add-to-list 'completion-at-point-functions #'cape-file)
+  (add-to-list 'completion-at-point-functions #'cape-dabbrev)
+  (add-to-list 'completion-at-point-functions #'cape-keyword)
+  (add-hook 'completion-at-point-functions #'cape-elisp-block))
+
 (use-package lsp-bridge
   :vc (:url "https://github.com/manateelazycat/lsp-bridge"
             :rev :newest
@@ -524,21 +558,19 @@
           c-mode
           cpp-mode) . lsp-bridge-mode)
   :init
-  (global-lsp-bridge-mode)
+  (setq acm-enable-codeium t)
+  ;; (setq acm-enable-icon nil
+  ;;       acm-enable-capf t
+  ;;       acm-enable-search-file-words t
+  ;;       acm-enable-yas t
+  ;;       acm-enable-doc t
+  ;;       acm-enable-doc-markdown-render t
+  ;;       acm-doc-delay 0.2
+  ;;       acm-candidate-match-function 'regexp-quote
+  ;;       acm-enable-search-words t
+  ;;       acm-backend-lsp-enable-auto-import t)
 
-  (setq acm-enable-quick-access t          ;; allow quick select by 1..0
-        acm-enable-icon t                  ;; icons (nice-to-have)
-        acm-enable-doc t                   ;; popup docs
-        acm-enable-doc-markdown-render t   ;; better docs rendering (if available)
-        acm-doc-delay 0.2                  ;; like corfu-popupinfo-delay
-        acm-candidate-max-number 30        ;; similar to corfu candidate count
-        acm-candidate-match-function 'regexp-quote ;; conservative matching
-        acm-enable-search-words t          ;; improves filtering in many stacks
-        acm-backend-lsp-enable-auto-import t)
-
-  (setq lsp-bridge-enable-completion-in-minibuffer t)
-
-  (dolist (dir '("~/.bun/bin" "~/.local/share/zana/bin" "~/.local/bin"))
+  (dolist (dir '("~/.bun/bin" "~/.local/bin"))
     (let* ((path (expand-file-name dir))
            (path-list (split-string (or (getenv "PATH") "") path-separator t)))
       (when (file-directory-p path)
@@ -549,18 +581,21 @@
   (setq lsp-bridge-user-langserver-dir (expand-file-name "~/.emacs.d/lsp-bridge/langserver/"))
   (setq lsp-bridge-user-multiserver-dir (expand-file-name "~/.emacs.d/lsp-bridge/multiserver/"))
 
-  (setq lsp-bridge-enable-hover-diagnostic nil
-        lsp-bridge-enable-signature-help t
-        lsp-bridge-enable-auto-format-code nil)
+  ;; (setq lsp-bridge-enable-hover-diagnostic nil
+  ;;       lsp-bridge-enable-signature-help t
+  ;;       lsp-bridge-enable-auto-format-code nil)
   :config
   (add-to-list 'lsp-bridge-multi-lang-server-extension-list '("py" . "ty_ruff"))
   (dolist (ext '("ts" "tsx" "js" "jsx"))
     (add-to-list 'lsp-bridge-multi-lang-server-extension-list (cons ext "tsls_oxlint_oxfmt")))
 
-  (defun my/lsp-bridge-xref-backend () 'lsp-bridge)
-  (add-hook 'lsp-bridge-mode-hook (lambda () (add-hook 'xref-backend-functions #'my/lsp-bridge-xref-backend nil t)))
-  (add-hook 'lsp-bridge-mode-hook (lambda () (corfu-mode -1)))
-
+  ;; (defun my/lsp-bridge-xref-backend () 'lsp-bridge)
+  ;; (add-hook 'lsp-bridge-mode-hook (lambda () (add-hook 'xref-backend-functions #'my/lsp-bridge-xref-backend nil t)))
+  (global-lsp-bridge-mode)
+  ;; (add-hook 'lsp-bridge-mode-hook
+  ;;           (lambda ()
+  ;;             (when (fboundp 'corfu-mode)
+  ;;               (corfu-mode -1))))
   :bind (:map lsp-bridge-mode-map
               ("M-."   . lsp-bridge-find-def)
               ("M-,"   . lsp-bridge-find-def-return)
@@ -572,25 +607,15 @@
               ("C-c l d" . lsp-bridge-diagnostics-list)
               ("C-c l f" . lsp-bridge-format-buffer)))
 
-(use-package corfu
-  :ensure t
-  ;; :hook ((eshell-mode . corfu-mode))
-  :init
-  (global-corfu-mode)
-  :custom
-  (setq corfu-auto-trigger ".")
-  (corfu-auto t)
-  (corfu-cycle t)
-  (corfu-echo-delay 0.2)
-  (corfu-popupinfo-delay 0.2))
-
-(use-package cape
-  :ensure t
-  :init
-  (add-to-list 'completion-at-point-functions #'cape-file)
-  (add-to-list 'completion-at-point-functions #'cape-dabbrev)
-  (add-to-list 'completion-at-point-functions #'cape-keyword)
-  (add-hook 'completion-at-point-functions #'cape-elisp-block))
+;; (use-package corfu
+;;   :ensure t
+;;   :init
+;;   (global-corfu-mode)
+;;   :custom
+;;   (corfu-auto t)
+;;   (corfu-cycle t)
+;;   (corfu-echo-delay 0.2)
+;;   (corfu-popupinfo-delay 0.2))
 
 (use-package emmet-mode
   :ensure t
@@ -605,15 +630,9 @@
   :config
   (apheleia-global-mode +1))
 
-(use-package typescript-ts-mode
-  :mode (("\\.ts\\'"  . typescript-ts-mode)
-         ("\\.tsx\\'" . tsx-ts-mode)))
-
 ;; AI
 (use-package copilot
-  :vc (:url "https://github.com/copilot-emacs/copilot.el"
-            :rev :newest
-            :branch "main")
+  :ensure t
   :bind (("C-z a a" . copilot-mode)
          :map copilot-completion-map
          ("<tab>" . copilot-accept-completion)
@@ -641,7 +660,6 @@
 (use-package emms
   :ensure t)
 
-;; Video
 (use-package mpvi
   :ensure t
   :custom
@@ -650,39 +668,39 @@
          ("C-z v s" . mpvi-speed)))
 
 ;; EAF
-(use-package eaf
-  :vc (:url "https://github.com/emacs-eaf/emacs-application-framework"
-            :rev :newest
-            :branch "master")
-  :demand t
-  :custom
-  (eaf-browser-translate-language "en")
-  (eaf-browser-continue-where-left-off t)
-  (eaf-browser-enable-adblocker t)
-  (eaf-browser-default-search-engine "duckduckgo")
-  (eaf-browse-blank-page-url "https://duckduckgo.com")
-  (eaf-pdf-dark-mode "force")
-  (browse-url-browser-function #'eaf-open-browser)
-  :config
-  (require 'eaf-browser)
-  (require 'eaf-org-previewer)
-  (require 'eaf-image-viewer)
-  (require 'eaf-markdown-previewer)
-  (require 'eaf-pdf-viewer)
+;; (use-package eaf
+;;   :vc (:url "https://github.com/emacs-eaf/emacs-application-framework"
+;;             :rev :newest
+;;             :branch "master")
+;;   :demand t
+;;   :custom
+;;   (eaf-browser-translate-language "en")
+;;   (eaf-browser-continue-where-left-off t)
+;;   (eaf-browser-enable-adblocker t)
+;;   (eaf-browser-default-search-engine "duckduckgo")
+;;   (eaf-browse-blank-page-url "https://duckduckgo.com")
+;;   (eaf-pdf-dark-mode "force")
+;;   (browse-url-browser-function #'eaf-open-browser)
+;;   :config
+;;   (require 'eaf-browser)
+;;   (require 'eaf-org-previewer)
+;;   (require 'eaf-image-viewer)
+;;   (require 'eaf-markdown-previewer)
+;;   (require 'eaf-pdf-viewer)
 
-  (defalias 'browse-web #'eaf-open-browser)
+;;   (defalias 'browse-web #'eaf-open-browser)
 
-  (defun adviser-find-file (orig-fn file &rest args)
-    (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
-      (pcase (file-name-extension file)
-        ((or "pdf" "epub") (funcall fn file))
-        (_ (apply orig-fn file args)))))
+;;   (defun adviser-find-file (orig-fn file &rest args)
+;;     (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
+;;       (pcase (file-name-extension file)
+;;         ((or "pdf" "epub") (funcall fn file))
+;;         (_ (apply orig-fn file args)))))
 
-  (advice-add #'find-file :around #'adviser-find-file)
+;;   (advice-add #'find-file :around #'adviser-find-file)
 
-  (keymap-global-set "C-c C-o" #'eaf-open-url-at-point)
-  (keymap-set my/c-z-map "C-z f" #'eaf-open)
-  (keymap-set my/c-z-map "C-z u" #'eaf-open-browser)
-  (keymap-set my/c-z-map "C-z h" #'eaf-open-browser-with-history)
-  (keymap-set my/c-z-map "C-z s" #'eaf-search-it)
-  (keymap-set my/c-z-map "C-z p" #'eaf-open-pdf-from-history))
+;;   (keymap-global-set "C-c C-o" #'eaf-open-url-at-point)
+;;   (keymap-set my/c-z-map "C-z f" #'eaf-open)
+;;   (keymap-set my/c-z-map "C-z u" #'eaf-open-browser)
+;;   (keymap-set my/c-z-map "C-z h" #'eaf-open-browser-with-history)
+;;   (keymap-set my/c-z-map "C-z s" #'eaf-search-it)
+;;   (keymap-set my/c-z-map "C-z p" #'eaf-open-pdf-from-history))
