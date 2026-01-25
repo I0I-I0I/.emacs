@@ -1,5 +1,5 @@
 (setq custom-file (expand-file-name "custom.el" user-emacs-directory))
-                                        ; (load custom-file 'noerror 'nomessage)
+(load custom-file 'noerror 'nomessage)
 
 (push '(fullscreen . maximized) default-frame-alist)
 
@@ -8,20 +8,18 @@
 
 ;; Font
 (when (display-graphic-p)
-  (when (or (find-font (font-spec :family "Maple Mono"))
-            (find-font (font-spec :family "Maple Mono NF")))
+  (when (find-font (font-spec :family "Maple Mono"))
     (set-frame-font
      (pcase system-type
        ('windows-nt "Maple Mono-16")
        ('gnu/linux  "Maple Mono-18"))
+     t t))
+  (when (find-font (font-spec :family "Maple Mono NF"))
+    (set-frame-font
+     (pcase system-type
+       ('windows-nt "Maple Mono NF-16")
+       ('gnu/linux  "Maple Mono NF-18"))
      t t)))
-
-;; windows specific
-(when (eq system-type 'windows-nt)
-  (setenv "PATH"
-          (concat "C:/Program Files/Git/usr/bin;"
-                  (getenv "PATH")))
-  (add-to-list 'exec-path "C:/Program Files/Git/usr/bin"))
 
 ;; Fix encoding
 (defun my/revert-buffer-utf8 ()
@@ -32,6 +30,22 @@
     (revert-buffer :ignore-auto :noconfirm)))
 
 (global-set-key (kbd "C-c u") #'my/revert-buffer-utf8)
+
+(set-language-environment "UTF-8")
+(set-default-coding-systems 'utf-8-unix)
+(set-terminal-coding-system 'utf-8-unix)
+(set-keyboard-coding-system 'utf-8-unix)
+(prefer-coding-system 'utf-8-unix)
+(setq default-process-coding-system '(utf-8-unix . utf-8-unix))
+(setq file-name-coding-system 'utf-8-unix)
+(setq locale-coding-system 'utf-8-unix)
+
+;; windows specific
+(when (eq system-type 'windows-nt)
+  (setenv "PATH"
+          (concat "C:/Program Files/Git/usr/bin;"
+                  (getenv "PATH")))
+  (add-to-list 'exec-path "C:/Program Files/Git/usr/bin"))
 
 ;; Package and use-package
 (require 'package)
@@ -258,8 +272,8 @@
   (lambda-line-status-invert nil)
   (lambda-line-vc-symbol " ±")
   (lambda-line-gui-ro-symbol  " ×")
-  (lambda-line-gui-mod-symbol " ●")
-  (lambda-line-gui-rw-symbol  " ◯")
+  (lambda-line-gui-mod-symbol "  ")
+  (lambda-line-gui-rw-symbol  "  ")
   (lambda-line-space-top +.30)
   (lambda-line-space-bottom -.30)
   (lambda-line-symbol-position 0)
@@ -599,11 +613,11 @@
               ("<backtab>" . dirvish-layout-toggle)))
 
 ;; Media
-(use-package emms
-  :ensure t)
-
 (use-package mpvi
   :ensure t
+  :init
+  (use-package emms
+    :ensure t)
   :custom
   (mpvi-mpv-ontop-p t)
   :bind (("C-z C-v" . mpvi-play)
@@ -615,6 +629,9 @@
             :rev :newest
             :branch "master")
   :demand t
+  :init
+  (use-package htmlize
+    :ensure t)
   :custom
   (eaf-browser-translate-language "en")
   (eaf-browser-continue-where-left-off t)
@@ -640,7 +657,6 @@
   (advice-add #'find-file :around #'adviser-find-file)
 
   (keymap-global-set "C-c C-o" #'eaf-open-url-at-point)
-  (keymap-set my/c-z-map "C-z f" #'eaf-open)
   (keymap-set my/c-z-map "C-z u" #'eaf-open-browser)
   (keymap-set my/c-z-map "C-z h" #'eaf-open-browser-with-history)
   (keymap-set my/c-z-map "C-z s" #'eaf-search-it)
