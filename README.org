@@ -1,0 +1,89 @@
+* Emacs config
+
+** Quickstart
+
+1. Clone this repo into `~/.emacs.d` (or `%APPDATA%/.emacs.d` on Windows).
+2. Start Emacs once to let packages install.
+3. Run `M-x my/treesit-install` to build tree-sitter grammars.
+
+** Installation
+
+This config assumes Emacs 30+ (tree-sitter built in).
+
+*** Linux
+
+#+begin_src shell
+  git clone https://git.savannah.gnu.org/git/emacs.git
+  cd emacs
+  git checkout emacs-30.2
+  ./autogen.sh
+  ./configure --prefix=/usr/local --with-x --with-x-toolkit=gtk3 --without-pgtk --with-native-compilation --with-tree-sitter --with-modules --with-cairo --with-imagemagick --with-xft
+  make -j$(nproc)
+  sudo make install
+#+end_src
+
+*** Windows
+
+#+begin_src shell
+  choco install emacs
+#+end_src
+
+** Requirements
+
+*** Windows
+
+#+begin_src shell
+  choco install gnuwin
+#+end_src
+
+*** Shell
+
+  - [[https://bun.com/docs/installation][bun]] / [[https://nodejs.org/en/download][npm]]
+  - [[https://www.python.org/downloads/][python]] / [[https://docs.astral.sh/uv/getting-started/installation/][uv]]
+  - [[https://github.com/BurntSushi/ripgrep#installation][ripgrep]]
+    #+begin_src shell
+      choco install ripgrep
+      sudo dnf install ripgrep
+      sudo pacman -S ripgrep
+    #+end_src
+
+*** Optional
+  - Maple Mono / Maple Mono NF (GUI font)
+  - mpv (for mpvi)
+
+** LSP
+
+- lsp-bridge
+  #+begin_src shell
+    pip3 install epc orjson sexpdata six setuptools paramiko rapidfuzz watchdog packaging
+  #+end_src
+
+** LSP
+lsp-bridge is enabled globally.
+Language server mapping:
+  - ts/js: `tsls_oxlint_oxfmt`
+  - py: `ty_ruff`
+
+  Install tools:
+  #+begin_src shell
+  bun install -g \
+    typescript-language-server typescript \
+    oxlint oxfmt \
+    vscode-langservers-extracted
+
+  uv tool install ruff ty
+  #+end_src
+
+** Fonts (optional)
+
+- Maple Mono NF (configured on GUI builds if installed)
+
+** Windows notes
+
+- Git is expected at `C:/Program Files/Git/usr/bin` (added to PATH in `init.el`).
+- `bash-completion` uses WSL when available.
+
+** After install
+
+- M-x `eaf-intall`
+- M-x `my/treesit-install`
