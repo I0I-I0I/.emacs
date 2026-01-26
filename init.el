@@ -2,6 +2,8 @@
 (load custom-file 'noerror 'nomessage)
 
 (push '(fullscreen . maximized) default-frame-alist)
+(add-to-list 'default-frame-alist '(undecorated . t))
+(set-frame-parameter nil 'undecorated t)
 
 (defvar my/gc-cons-threshold-orig gc-cons-threshold)
 (defvar my/gc-cons-percentage-orig gc-cons-percentage)
@@ -245,6 +247,26 @@
   (editorconfig-mode 1))
 
 ;; Theme/UI
+(defun my/toggle-transparency-black-bg ()
+  (interactive)
+  (when (display-graphic-p)
+    (let* ((alpha (or (frame-parameter nil 'alpha-background)
+                      (car-safe (frame-parameter nil 'alpha))
+                      100))
+           (on? (= alpha 100))
+           (a (if on? 72 100)))
+      (condition-case _
+          (set-frame-parameter nil 'alpha-background a)
+        (error (set-frame-parameter nil 'alpha (cons a a))))
+      (if on?
+          (set-face-background 'default "#000000")
+        (mapc (lambda (theme) (load-theme theme t)) custom-enabled-themes))
+      (set-frame-size (selected-frame)
+                      (frame-width) (frame-height) t))))
+
+(global-set-key (kbd "C-c t") #'my/toggle-transparency-black-bg)
+(my/toggle-transparency-black-bg)
+
 (use-package lambda-themes
   :vc (:url "https://github.com/Lambda-Emacs/lambda-themes"
             :rev :newest
