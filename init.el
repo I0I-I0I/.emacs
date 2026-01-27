@@ -15,13 +15,13 @@
   (when (find-font (font-spec :family "Maple Mono"))
     (set-frame-font
      (pcase system-type
-       ('windows-nt "Maple Mono-16")
+       ('windows-nt "Maple Mono-14")
        ('gnu/linux  "Maple Mono-18"))
      t t))
   (when (find-font (font-spec :family "Maple Mono NF"))
     (set-frame-font
      (pcase system-type
-       ('windows-nt "Maple Mono NF-16")
+       ('windows-nt "Maple Mono NF-14")
        ('gnu/linux  "Maple Mono NF-18"))
      t t)))
 
@@ -44,12 +44,20 @@
 (setq file-name-coding-system 'utf-8-unix)
 (setq locale-coding-system 'utf-8-unix)
 
-;; windows specific
+;; Set PATH
+(defun my/add-to-path (dir)
+  (let ((path (expand-file-name dir)))
+    (when (file-directory-p path)
+      (unless (member path exec-path)
+        (setq exec-path (cons path exec-path)))
+      (let ((current (getenv "PATH")))
+        (unless (string-match-p (regexp-quote path) current)
+          (setenv "PATH" (concat path path-separator current)))))))
+
+;;; windows specific
 (when (eq system-type 'windows-nt)
-  (setenv "PATH"
-          (concat "C:/Program Files/Git/usr/bin;"
-                  (getenv "PATH")))
-  (add-to-list 'exec-path "C:/Program Files/Git/usr/bin"))
+  (my/add-to-path "C:/Program Files/Git/usr/bin")
+  (my/add-to-path "D:/programm/vips/bin"))
 
 ;; Package and use-package
 (require 'package)
@@ -255,22 +263,35 @@
 (defun my/toggle-transparency-black-bg ()
   (interactive)
   (when (display-graphic-p)
-    (let* ((alpha (or (frame-parameter nil 'alpha-background)
-                      (car-safe (frame-parameter nil 'alpha))
-                      100))
+    (let* ((raw (frame-parameter nil 'alpha))
+           (alpha (cond ((numberp raw) raw)
+                        ((consp raw) (car raw))
+                        ((and (listp raw) (numberp (car raw))) (car raw))
+                        (t 100)))
            (on? (= alpha 100))
            (a (if on? 72 100)))
-      (condition-case _
-          (set-frame-parameter nil 'alpha-background a)
-        (error (set-frame-parameter nil 'alpha (cons a a))))
+      (set-frame-parameter nil 'alpha (cons a a))
       (if on?
           (set-face-background 'default "#000000")
-        (mapc (lambda (theme) (load-theme theme t)) custom-enabled-themes))
-      (set-frame-size (selected-frame)
-                      (frame-width) (frame-height) t))))
+        (mapc (lambda (theme) (load-theme theme t)) custom-enabled-themes)))))
 
 (global-set-key (kbd "C-c t") #'my/toggle-transparency-black-bg)
 (my/toggle-transparency-black-bg)
+
+(use-package minimal-dashboard
+  :vc (:url "https://github.com/dheerajshenoy/minimal-dashboard.el"
+            :rev :newest
+            :branch "main")
+  :hook (minimal-dashboard-mode-hook . (lambda ()
+                                         (display-line-numbers-mode 0)))
+  :init
+  (setq initial-buffer-choice #'minimal-dashboard)
+  :custom
+  (minimal-dashboard-buffer-name "Dashboard")
+  (minimal-dashboard-text (lambda () (format "started in %s" (emacs-init-time))))
+  (minimal-dashboard-image-scale 1.25)
+  (minimal-dashboard-enable-resize-handling t)
+  (minimal-dashboard-modeline-shown nil))
 
 (use-package lambda-themes
   :vc (:url "https://github.com/Lambda-Emacs/lambda-themes"
@@ -286,29 +307,18 @@
         lambda-themes-set-variable-pitch t)
   (load-theme 'lambda-dark t))
 
-(use-package lambda-line
-  :vc (:url "https://github.com/Lambda-Emacs/lambda-line"
-            :rev :newest
-            :branch "main")
-  :after lambda-themes
-  :custom
-  (lambda-line-icon-time t)
-  (lambda-line-clockface-update-fontset "ClockFaceRect")
-  (lambda-line-position 'bottom)
-  (lambda-line-abbrev t)
-  (lambda-line-prefix t)
-  (lambda-line-hspace "  ")
-  (lambda-line-prefix-padding nil)
-  (lambda-line-status-invert nil)
-  (lambda-line-vc-symbol " ±")
-  (lambda-line-gui-ro-symbol  " ×")
-  (lambda-line-gui-mod-symbol "  ")
-  (lambda-line-gui-rw-symbol  "  ")
-  (lambda-line-space-top +.30)
-  (lambda-line-space-bottom -.30)
-  (lambda-line-symbol-position 0)
+(use-package mood-line
+  :ensure t
   :config
-  (lambda-line-mode))
+  (let ((bg (face-background 'mode-line nil t)))
+    (set-face-attribute
+     'mode-line nil
+     :box `(:line-width 6 :color ,bg)))
+  (let ((bg (face-background 'mode-line-inactive nil t)))
+    (set-face-attribute
+     'mode-line-inactive nil
+     :box `(:line-width 6 :color ,bg)))
+  (mood-line-mode))
 
 ;; IBuffer
 (use-package ibuffer
@@ -367,7 +377,7 @@
   (use-package corfu
     :ensure t
     :custom
-    (corfu-auto t)
+    (corfu-auto nil)
     (corfu-cycle t)
     (corfu-preselect 'prompt)
     (corfu-quit-no-match 'separator)
@@ -400,7 +410,9 @@
                       ((= (length eshell-bufs) 1) (switch-to-buffer (car eshell-bufs)))
                       (t (call-interactively #'eshell)))))))
   :config
+  (advice-add 'eshell-browse-url :override #'ignore)
   (setq eshell-visual-commands '()
+        shell-browse-url-functions nil
         eshell-cmpl-cycle-completions nil
         eshell-cmpl-ignore-case t
         eshell-cmpl-autolist t
@@ -412,6 +424,8 @@
         eshell-scroll-show-maximum-output t
         eshell-hist-ignoredups t
         eshell-prefer-lisp-functions nil)
+
+  (advice-add 'browse-url :before (lambda (&rest _) (backtrace)))
 
   (defun eshell/o (&rest args)
     (let ((target (string-join args " ")))
@@ -439,6 +453,7 @@
 
 (use-package bash-completion
   :ensure t
+  :if (not (eq system-type 'windows-nt))
   :after eshell
   :if (or (and (eq system-type 'gnu/linux)
                (executable-find "bash"))
@@ -716,7 +731,7 @@
 (use-package sublimity
   :ensure t
   :config
-  (require 'sublimity-scroll)
+  ;; (require 'sublimity-scroll)
   (require 'sublimity-attractive)
   :bind (("C-z z" . sublimity-mode)))
 

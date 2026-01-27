@@ -32,9 +32,11 @@ This config assumes Emacs 30+ (tree-sitter built in).
 
 *** Windows
 
-#+begin_src shell
-  choco install gnuwin
-#+end_src
+  - [[https://www.libvips.org/install.html][dirvish image preview]]
+  - install deps
+  #+begin_src shell
+    choco install gnuwin
+  #+end_src
 
 *** Shell
 
@@ -66,10 +68,7 @@ Language server mapping:
 
   Install tools:
   #+begin_src shell
-  bun install -g \
-    typescript-language-server typescript \
-    oxlint oxfmt \
-    vscode-langservers-extracted
+  bun install -g typescript-language-server typescript oxlint oxfmt vscode-langservers-extracted
 
   uv tool install ruff ty
   #+end_src
