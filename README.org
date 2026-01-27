@@ -74,10 +74,6 @@ Language server mapping:
   uv tool install ruff ty
   #+end_src
 
-** Fonts (optional)
-
-- Maple Mono NF (configured on GUI builds if installed)
-
 ** Windows notes
 
 - Git is expected at `C:/Program Files/Git/usr/bin` (added to PATH in `init.el`).
