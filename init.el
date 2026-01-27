@@ -1,3 +1,5 @@
+;;; init.el --- Emacs init -*- lexical-binding: t; -*-
+
 (setq custom-file (expand-file-name "custom.el" user-emacs-directory))
 (load custom-file 'noerror 'nomessage)
 
@@ -182,7 +184,10 @@
         (user-error "No filename at point"))))
 
   (define-prefix-command 'my/c-z-map)
-  (global-set-key (kbd "C-z") my/c-z-map)
+  (defvar my/c-z-z-map (make-sparse-keymap))
+  (define-key global-map (kbd "C-z") my/c-z-map)
+  (define-key my/c-z-map (kbd "C-z") my/c-z-z-map)
+
   :bind
   (("C-z" . my/c-z-map)
    ("C-v" . scroll-half-page-up)
@@ -353,27 +358,66 @@
 ;; Eshell
 (use-package eshell
   :ensure nil
-  :hook (eshell-mode . (lambda () (display-line-numbers-mode -1)))
+  :hook (eshell-mode . (lambda ()
+                         (display-line-numbers-mode -1)
+                         (setq eshell-command-aliases-list
+                               '(("la" "ls -Alhvp --group-directories-first --color=always")
+                                 ("py" "uv run python")))))
   :init
+  (use-package corfu
+    :ensure t
+    :custom
+    (corfu-auto t)
+    (corfu-cycle t)
+    (corfu-preselect 'prompt)
+    (corfu-quit-no-match 'separator)
+    :hook
+    ((shell-mode eshell-mode) . corfu-mode)
+    (shell-mode . (lambda ()
+                    (setq-local corfu-auto-delay 0.2
+                                corfu-auto-prefix 2))))
+
+  (use-package vterm
+    :ensure t
+    :commands (vterm)
+    :hook (vterm-mode . (lambda () (display-line-numbers-mode -1))))
+
   (use-package eat
     :ensure t
     :commands (eat eat-eshell-mode)
     :hook (eshell-mode . eat-eshell-mode))
 
-  :custom
-  (eshell-scroll-to-bottom-on-input 'all)
-  :bind (("C-c e" . eshell))
+  :bind (("C-c e"
+          . (lambda ()
+              (interactive)
+              (let* ((in-eshell (derived-mode-p 'eshell-mode))
+                     (eshell-bufs
+                      (seq-filter
+                       (lambda (b) (with-current-buffer b (derived-mode-p 'eshell-mode)))
+                       (buffer-list))))
+                (cond (in-eshell (eshell t))
+                      ((null eshell-bufs) (eshell))
+                      ((= (length eshell-bufs) 1) (switch-to-buffer (car eshell-bufs)))
+                      (t (call-interactively #'eshell)))))))
   :config
-  (setq eshell-cmpl-cycle-completions nil
+  (setq eshell-visual-commands '()
+        eshell-cmpl-cycle-completions nil
         eshell-cmpl-ignore-case t
         eshell-cmpl-autolist t
         eshell-cmpl-expand-tildes t
-        eshell-cmpl-replace-by-expanded-string t)
-  (setq eshell-history-size 5000
-        eshell-scroll-to-bottom-on-input t
+        eshell-cmpl-replace-by-expanded-string t
+        eshell-history-size 10000
+        eshell-buffer-maximum-lines 10000
+        eshell-scroll-to-bottom-on-input 'all
         eshell-scroll-show-maximum-output t
         eshell-hist-ignoredups t
         eshell-prefer-lisp-functions nil)
+
+  (defun eshell/o (&rest args)
+    (let ((target (string-join args " ")))
+      (cond ((eq system-type 'darwin) (start-process "open" nil "open" target))
+            ((eq system-type 'windows-nt) (w32-shell-execute "open" target))
+            (t (start-process "xdg-open" nil "xdg-open" target)))))
 
   (defun my/eshell-history-fuzzy ()
     (interactive)
@@ -679,21 +723,18 @@
 ;; Dirvish
 (use-package dirvish
   :ensure t
-  :init
-  (use-package dired
-    :ensure nil
-    :hook (dired-mode . dired-omit-mode)
-    :custom (dired-omit-files (rx string-start (or "." "..") string-end)))
+  :init (use-package dired
+          :ensure nil
+          :hook (dired-mode . dired-omit-mode)
+          :custom (dired-omit-files (rx string-start (or "." "..") string-end)))
 
   (dirvish-override-dired-mode)
-  :hook
-  (dired-mode . (lambda () (display-line-numbers-mode -1)))
+  :hook (dired-mode . (lambda () (display-line-numbers-mode -1)))
   :custom
   (dirvish-attributes '(vc-state subtree-state collapse git-msg file-size file-time))
   (dirvish-preview-dispatchers '(image video audio archive pdf))
   (dired-listing-switches "-alh --group-directories-first")
-  :config
-  (dirvish-side-follow-mode)
+  :config (dirvish-side-follow-mode)
   :bind (:map dirvish-mode-map
               ("TAB" . dirvish-subtree-toggle)
               ("h" . dired-up-directory)
@@ -703,11 +744,8 @@
 ;; Media
 (use-package mpvi
   :ensure t
-  :init
-  (use-package emms
-    :ensure t)
-  :custom
-  (mpvi-mpv-ontop-p t)
+  :init (use-package emms :ensure t)
+  :custom (mpvi-mpv-ontop-p t)
   :bind (("C-z C-v" . mpvi-play)
          ("C-z v s" . mpvi-speed)))
 
@@ -716,10 +754,8 @@
   :vc (:url "https://github.com/emacs-eaf/emacs-application-framework"
             :rev :newest
             :branch "master")
-  :demand t
-  :init
-  (use-package htmlize
-    :ensure t)
+  :commands (eaf-open-browser eaf-open eaf-search-it eaf-open-url-at-point eaf-open-browser-with-history eaf-open-pdf-from-history)
+  :init (use-package htmlize :ensure t)
   :custom
   (eaf-browser-translate-language "en")
   (eaf-browser-continue-where-left-off t)
@@ -744,8 +780,9 @@
 
   (advice-add #'find-file :around #'adviser-find-file)
 
-  (keymap-global-set "C-c C-o" #'eaf-open-url-at-point)
-  (keymap-set my/c-z-map "C-z u" #'eaf-open-browser)
-  (keymap-set my/c-z-map "C-z h" #'eaf-open-browser-with-history)
-  (keymap-set my/c-z-map "C-z s" #'eaf-search-it)
-  (keymap-set my/c-z-map "C-z p" #'eaf-open-pdf-from-history))
+  :bind (("C-c C-o" . eaf-open-url-at-point)
+         :map my/c-z-z-map
+         ("u" . eaf-open-browser)
+         ("h" . eaf-open-browser-with-history)
+         ("s" . eaf-search-it)
+         ("p" . eaf-open-pdf-from-history)))
