@@ -2,15 +2,16 @@
 
 ** Quickstart
 
-1. Clone this repo into `~/.emacs.d` (or `%APPDATA%/.emacs.d` on Windows).
+1. Clone this repo into =~/.emacs.d= (or =%APPDATA%/.emacs.d= on Windows).
 2. Start Emacs once to let packages install.
-3. Run `M-x my/treesit-install` to build tree-sitter grammars.
+3. Run =M-x my/treesit-install= to build tree-sitter grammars.
+4. Run =M-x eaf-install= if you use EAF.
 
 ** Installation
 
-This config assumes Emacs 30+ (tree-sitter built in).
+This config assumes Emacs 30+ (built-in tree-sitter).
 
-*** Linux
+*** Linux (build from source)
 
 #+begin_src shell
   git clone https://git.savannah.gnu.org/git/emacs.git
@@ -22,7 +23,7 @@ This config assumes Emacs 30+ (tree-sitter built in).
   sudo make install
 #+end_src
 
-*** Windows
+*** Windows (Chocolatey)
 
 #+begin_src shell
   choco install emacs
@@ -32,53 +33,51 @@ This config assumes Emacs 30+ (tree-sitter built in).
 
 *** Windows
 
-  - [[https://www.libvips.org/install.html][dirvish image preview]]
-  - install deps
-  #+begin_src shell
-    choco install gnuwin
-  #+end_src
+- [[https://www.libvips.org/install.html][libvips]] (Dirvish image preview)
+- Extra tools:
+#+begin_src shell
+  choco install gnuwin
+#+end_src
 
-*** Shell
+*** Shell tools
 
-  - [[https://bun.com/docs/installation][bun]] / [[https://nodejs.org/en/download][npm]]
-  - [[https://www.python.org/downloads/][python]] / [[https://docs.astral.sh/uv/getting-started/installation/][uv]]
-  - [[https://github.com/BurntSushi/ripgrep#installation][ripgrep]]
-    #+begin_src shell
-      choco install ripgrep
-      sudo dnf install ripgrep
-      sudo pacman -S ripgrep
-    #+end_src
+- [[https://bun.com/docs/installation][bun]] and [[https://nodejs.org/en/download][npm]]
+- [[https://www.python.org/downloads/][python]] and [[https://docs.astral.sh/uv/getting-started/installation/][uv]]
+- [[https://github.com/BurntSushi/ripgrep#installation][ripgrep]]
+#+begin_src shell
+  choco install ripgrep
+  sudo dnf install ripgrep
+  sudo pacman -S ripgrep
+#+end_src
 
 *** Optional
-  - Maple Mono / Maple Mono NF (GUI font)
-  - mpv (for mpvi)
 
-** LSP
+- Maple Mono / Maple Mono NF (GUI font)
+- mpv (for mpvi)
 
-- lsp-bridge
-  #+begin_src shell
-    pip3 install epc orjson sexpdata six setuptools paramiko rapidfuzz watchdog packaging
-  #+end_src
+** LSP (lsp-bridge)
 
-** LSP
-lsp-bridge is enabled globally.
-Language server mapping:
-  - ts/js: `tsls_oxlint_oxfmt`
-  - py: `ty_ruff`
+*** Python deps
 
-  Install tools:
-  #+begin_src shell
+#+begin_src shell
+  pip3 install epc orjson sexpdata six setuptools paramiko rapidfuzz watchdog packaging
+#+end_src
+
+*** Language server mapping
+
+- ts/js: =tsls_oxlint_oxfmt=
+- py: =ty_ruff=
+
+*** Install tools
+
+#+begin_src shell
   bun install -g typescript-language-server typescript oxlint oxfmt vscode-langservers-extracted
 
   uv tool install ruff ty
-  #+end_src
+#+end_src
 
 ** Windows notes
 
-- Git is expected at `C:/Program Files/Git/usr/bin` (added to PATH in `init.el`).
-- `bash-completion` uses WSL when available.
-
-** After install
-
-- M-x `eaf-intall`
-- M-x `my/treesit-install`
+- Git is expected at =C:/Program Files/Git/usr/bin= (added to PATH in =init.el=).
+- vips is expected at C:/Program Files/vips/bin
+- =bash-completion= uses WSL when available.
