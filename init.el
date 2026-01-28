@@ -83,8 +83,8 @@
   :ensure nil
   :demand t
   :init
-  (setq gc-cons-threshold (* 256 1024 1024)
-        gc-cons-percentage 0.6
+  (setq gc-cons-threshold (* 64 1024 1024)
+        gc-cons-percentage 0.1
         read-process-output-max (* 4 1024 1024))
 
   (add-hook 'emacs-startup-hook
@@ -669,7 +669,7 @@
         lsp-bridge-enable-signature-help t
         lsp-bridge-enable-auto-format-code nil)
   :config
-  (add-to-list 'lsp-bridge-multi-lang-server-extension-list '("py" . "ty_ruff"))
+  (add-to-list 'lsp-bridge-multi-lang-server-extension-list '("py" . "pyrefly_ruff"))
   (dolist (ext '("ts" "tsx" "js" "jsx"))
     (add-to-list 'lsp-bridge-multi-lang-server-extension-list (cons ext "tsls_oxlint_oxfmt")))
 
@@ -684,12 +684,26 @@
               ("C-c l s" . lsp-bridge-workspace-list-symbols)
               ("C-c l r" . lsp-bridge-rename)
               ("C-c l a" . lsp-bridge-code-action)
-              ("C-c l d" . lsp-bridge-diagnostics-list)
+              ("C-c l d" . lsp-bridge-diagnostic-list)
+              ("C-c l D" . lsp-bridge-workspace-diagnostic-list)
+              ("C-c C-n" . lsp-bridge-diagnostic-jump-next)
+              ("C-c C-p" . lsp-bridge-diagnostic-jump-prev)
               ("C-c l f" . lsp-bridge-format-buffer)))
 
 (use-package emmet-mode
   :ensure t
   :hook ((html-mode css-mode sgml-mode web-mode js-jsx-mode tsx-ts-mode) . emmet-mode))
+
+(with-eval-after-load 'compile
+  (defconst my/pyrefly-compilation-regexp
+    "^[[:space:]]*-->[[:space:]]+\\(.+\\):\\([0-9]+\\):\\([0-9]+\\)$")
+  (add-to-list
+   'compilation-error-regexp-alist-alist
+   (list 'pyrefly my/pyrefly-compilation-regexp 1 2 3))
+  (defun my/compilation-ensure-pyrefly ()
+    (add-to-list 'compilation-error-regexp-alist 'pyrefly))
+  (add-hook 'compilation-mode-hook #'my/compilation-ensure-pyrefly)
+  (add-hook 'compilation-start-hook (lambda (_proc) (my/compilation-ensure-pyrefly))))
 
 (use-package flycheck
   :ensure t

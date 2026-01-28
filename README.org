@@ -73,7 +73,7 @@ This config assumes Emacs 30+ (built-in tree-sitter).
 #+begin_src bash
   bun install -g typescript-language-server typescript oxlint oxfmt vscode-langservers-extracted
 
-  uv tool install ruff ty
+  uv tool install ruff pyrefly
 #+end_src
 
 ** Windows notes

@@ -1,0 +1,6 @@
+{
+  "name": "pyrefly",
+  "languageId": "python",
+  "command": ["pyrefly", "lsp"],
+  "settings": {}
+}
