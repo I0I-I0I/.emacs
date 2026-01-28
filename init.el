@@ -135,6 +135,14 @@
   (setq savehist-additional-variables '(register-alist))
   (savehist-mode 1)
 
+  (setq mouse-wheel-scroll-amount '(1 ((shift) . 1)))
+  (setq mouse-wheel-progressive-speed nil)
+  (setq mouse-wheel-follow-mouse t)
+  (setq scroll-margin 5)
+  (setq scroll-step 1)
+  (setq scroll-conservatively 10000)
+  (setq scroll-preserve-screen-position t)
+
   (custom-set-variables
    '(uniquify-buffer-name-style (quote post-forward) nil (uniquify)))
 
@@ -207,8 +215,8 @@
    ("C-c C-l" . (lambda () (interactive) (duplicate-line) (next-line)))
    ("C-c o" . open-file-at-point)
    ("C-c C-o" . browse-url-at-point)
-   ("M-p" . move-text-up)
-   ("M-n" . move-text-down)))
+   ("C-S-n" . move-text-down)
+   ("C-S-p" . move-text-up)))
 
 ;; Grep
 (use-package wgrep
@@ -266,7 +274,7 @@
           (set-face-background 'default "#000000")
         (mapc (lambda (theme) (load-theme theme t)) custom-enabled-themes)))))
 
-(global-set-key (kbd "C-c t") #'my/toggle-transparency-black-bg)
+(global-set-key (kbd "C-c T") #'my/toggle-transparency-black-bg)
 (my/toggle-transparency-black-bg)
 
 (use-package minimal-dashboard
@@ -381,25 +389,71 @@
   (use-package vterm
     :ensure t
     :commands (vterm)
-    :hook (vterm-mode . (lambda () (display-line-numbers-mode -1))))
+    :hook (vterm-mode . (lambda () (display-line-numbers-mode -1)))
+    :bind ("C-c t" . vterm))
 
   (use-package eat
     :ensure t
     :commands (eat eat-eshell-mode)
     :hook (eshell-mode . eat-eshell-mode))
 
-  :bind (("C-c e"
-          . (lambda ()
-              (interactive)
-              (let* ((in-eshell (derived-mode-p 'eshell-mode))
-                     (eshell-bufs
-                      (seq-filter
-                       (lambda (b) (with-current-buffer b (derived-mode-p 'eshell-mode)))
-                       (buffer-list))))
-                (cond (in-eshell (eshell t))
-                      ((null eshell-bufs) (eshell))
-                      ((= (length eshell-bufs) 1) (switch-to-buffer (car eshell-bufs)))
-                      (t (call-interactively #'eshell)))))))
+  (require 'seq)
+  (require 'subr-x)
+
+  (defun my/eshell--buffer-p (b)
+    (with-current-buffer b
+      (derived-mode-p 'eshell-mode)))
+
+  (defun my/eshell--buf-dir (b)
+    "Return normalized `default-directory` for eshell buffer B."
+    (with-current-buffer b
+      (file-truename (expand-file-name default-directory))))
+
+  (defun my/eshell--current-dir ()
+    (file-truename (expand-file-name default-directory)))
+
+  (defun my/eshell--find-by-dir (dir)
+    "Find an existing eshell buffer whose `default-directory` matches DIR."
+    (let ((target (file-truename (expand-file-name dir))))
+      (seq-find (lambda (b)
+                  (and (my/eshell--buffer-p b)
+                       (string= (my/eshell--buf-dir b) target)))
+                (buffer-list))))
+
+  (defun my/eshell--new-in-dir (dir)
+    "Create a new eshell buffer and start it in DIR."
+    (let ((default-directory dir))
+      (eshell t)))
+
+  (defun my/toggle-eshell-here ()
+    "Jump to an eshell buffer for the current directory, or create one."
+    (interactive)
+    (let* ((dir (my/eshell--current-dir))
+           (buf (my/eshell--find-by-dir dir)))
+      (cond
+       (buf (switch-to-buffer buf))
+       (t   (my/eshell--new-in-dir dir)))))
+
+  (require 'project)
+
+  (defun my/eshell--project-dir ()
+    "Return project root if available, else current `default-directory`."
+    (if-let* ((pr (project-current nil)))
+        (file-truename (project-root pr))
+      (my/eshell--current-dir)))
+
+  (defun my/toggle-eshell-project ()
+    "Jump to an eshell buffer for the project root (or current dir), or create one."
+    (interactive)
+    (let* ((dir (my/eshell--project-dir))
+           (buf (my/eshell--find-by-dir dir)))
+      (if buf
+          (switch-to-buffer buf)
+        (my/eshell--new-in-dir dir))))
+
+  :bind (("C-c e" . my/toggle-eshell-here)
+         ("C-x p e" . my/toggle-eshell-project))
+
   :config
   (advice-add 'eshell-browse-url :override #'ignore)
   (setq eshell-visual-commands '()
@@ -678,6 +732,7 @@
   (global-lsp-bridge-mode)
   :bind (:map lsp-bridge-mode-map
               ("M-."   . lsp-bridge-find-def)
+              ("C-c M-." . lsp-bridge-find-type-def)
               ("M-,"   . lsp-bridge-find-def-return)
               ("M-?"   . lsp-bridge-find-references)
               ("C-h ." . lsp-bridge-popup-documentation)
@@ -715,11 +770,15 @@
   (apheleia-global-mode +1))
 
 ;; DAP
-
 (use-package dap-mode
   :ensure t
   :config
   (setq dap-auto-configure-features '(sessions locals controls tooltip)))
+
+;; Docker
+(use-package docker
+  :ensure t
+  :bind ("C-z d" . docker))
 
 ;; AI
 (use-package copilot
@@ -760,6 +819,7 @@
   :custom
   (dirvish-attributes '(vc-state subtree-state collapse git-msg file-size file-time))
   (dirvish-preview-dispatchers '(image video audio archive pdf))
+  (dirvish-default-layout '(0 0.35 0.65))
   (dired-listing-switches "-alh --group-directories-first")
   :config (dirvish-side-follow-mode)
   :bind (:map dirvish-mode-map
@@ -771,6 +831,7 @@
 ;; Org
 (use-package org
   :ensure nil
+  :mode ("\\.org\\'" . org-mode)
   :hook ((org-mode . visual-line-mode)
          (org-mode . org-indent-mode)
          (org-mode . (lambda () (display-line-numbers-mode -1))))
