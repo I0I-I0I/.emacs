@@ -194,7 +194,7 @@
   (define-prefix-command 'my/c-z-map)
   (defvar my/c-z-z-map (make-sparse-keymap))
   (define-key global-map (kbd "C-z") my/c-z-map)
-  (define-key my/c-z-map (kbd "C-z") my/c-z-z-map)
+  (define-key my/c-z-map (kbd "z") my/c-z-z-map)
 
   :bind
   (("C-z" . my/c-z-map)
@@ -745,7 +745,7 @@
   :config
   ;; (require 'sublimity-scroll)
   (require 'sublimity-attractive)
-  :bind (("C-z z" . sublimity-mode)))
+  :bind (("C-z Z" . sublimity-mode)))
 
 ;; Dirvish
 (use-package dirvish
@@ -767,6 +767,17 @@
               ("h" . dired-up-directory)
               ("l" . dired-find-file)
               ("<backtab>" . dirvish-layout-toggle)))
+
+;; Org
+(use-package org
+  :ensure nil
+  :hook ((org-mode . visual-line-mode)
+         (org-mode . org-indent-mode)
+         (org-mode . (lambda () (display-line-numbers-mode -1))))
+  :config
+  (setq org-startup-folded 'content
+        org-startup-indented t
+        org-hide-emphasis-markers t))
 
 ;; Media
 (use-package mpvi
@@ -809,6 +820,7 @@
 
   :bind (("C-c C-o" . eaf-open-url-at-point)
          :map my/c-z-z-map
+         ("C-f" . eaf-open)
          ("u" . eaf-open-browser)
          ("h" . eaf-open-browser-with-history)
          ("s" . eaf-search-it)
