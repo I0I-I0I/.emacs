@@ -110,7 +110,7 @@
   (setq display-line-numbers-type 'relative)
   (global-display-line-numbers-mode 1)
 
-  (setq-default fill-column 80
+  (setq-default fill-column 120
                 indent-tabs-mode nil
                 tab-width 4
                 c-basic-offset 4
@@ -224,15 +224,6 @@
   :config
   (rg-enable-default-bindings)
   (rg-enable-menu))
-
-;; Whitespace
-(use-package whitespace
-  :ensure nil
-  :custom
-  (whitespace-style '(face empty tabs lines-tail trailing))
-  (whitespace-line-column 120)
-  :config
-  (global-whitespace-mode t))
 
 ;; Completion UI
 (use-package icomplete
@@ -708,6 +699,13 @@
   :ensure t
   :config
   (apheleia-global-mode +1))
+
+;; DAP
+
+(use-package dap-mode
+  :ensure t
+  :config
+  (setq dap-auto-configure-features '(sessions locals controls tooltip)))
 
 ;; AI
 (use-package copilot
