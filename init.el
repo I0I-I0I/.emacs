@@ -78,6 +78,50 @@
 (setq use-package-always-ensure t
       use-package-verbose nil)
 
+;; Tab naming helpers
+(defun my/tab-context-name ()
+  "Project name or fallback to directory name."
+  (or (when-let ((proj (project-current nil)))
+        (file-name-nondirectory
+         (directory-file-name (project-root proj))))
+      (file-name-nondirectory
+       (directory-file-name default-directory))))
+
+(defun my/tab--get (key &optional tab)
+  "Get KEY from TAB alist (defaults to current tab)."
+  (alist-get key (or tab (tab-bar--current-tab))))
+
+(defun my/tab--set (key value &optional tab)
+  "Set KEY to VALUE in TAB alist (defaults to current tab)."
+  (let* ((tab (or tab (tab-bar--current-tab)))
+         (cell (assq key tab)))
+    (if cell
+        (setcdr cell value)
+      (setcdr tab (cons (cons key value) (cdr tab)))))
+  value)
+
+(defun my/tab-auto-rename (&rest _)
+  "Auto-rename current tab to match project/directory context.
+Won't clobber a manually renamed tab."
+  (when (bound-and-true-p tab-bar-mode)
+    (let* ((name (my/tab-context-name))
+           (tab  (tab-bar--current-tab))
+           (cur  (alist-get 'name tab))
+           (last (my/tab--get 'my/auto-name tab)))
+      (when (and name
+                 (not (equal name last))
+                 (or (null last) (equal cur last)))
+        (my/tab--set 'my/auto-name name tab)
+        (tab-bar-rename-tab name)))))
+
+(defun my/tab-rename-to-context ()
+  "Force rename current tab to context name (overwrites manual name)."
+  (interactive)
+  (let ((name (my/tab-context-name)))
+    (when name
+      (my/tab--set 'my/auto-name name)
+      (tab-bar-rename-tab name))))
+
 ;; Core
 (use-package emacs
   :ensure nil
@@ -85,15 +129,8 @@
   :init
   (setq gc-cons-threshold (* 64 1024 1024)
         gc-cons-percentage 0.1
-        read-process-output-max (* 4 1024 1024))
-
-  (add-hook 'emacs-startup-hook
-            (lambda ()
-              (setq gc-cons-threshold my/gc-cons-threshold-orig
-                    gc-cons-percentage my/gc-cons-percentage-orig)
-              (run-with-idle-timer 5 nil #'garbage-collect)))
-
-  (setq auto-save-default nil
+        read-process-output-max (* 4 1024 1024)
+        auto-save-default nil
         make-backup-files nil)
 
   (when (boundp 'native-comp-async-report-warnings-errors)
@@ -101,11 +138,13 @@
   (when (boundp 'native-comp-deferred-compilation)
     (setq native-comp-deferred-compilation t))
 
-  (run-with-idle-timer 10 t #'garbage-collect)
+  (add-hook 'emacs-startup-hook
+            (lambda ()
+              (setq gc-cons-threshold my/gc-cons-threshold-orig
+                    gc-cons-percentage my/gc-cons-percentage-orig)
+              (run-with-idle-timer 5 nil #'garbage-collect)))
 
-  (set-face-attribute 'tab-bar nil :height 160)
-  (setq tab-bar-close-button-show nil
-        tab-bar-new-button-show nil)
+  (run-with-idle-timer 10 t #'garbage-collect)
 
   (setq display-line-numbers-type 'relative)
   (global-display-line-numbers-mode 1)
@@ -125,35 +164,35 @@
   (menu-bar-mode -1)
   (tool-bar-mode -1)
   (scroll-bar-mode -1)
+
   (add-hook 'before-save-hook #'delete-trailing-whitespace)
   (save-place-mode 1)
   (global-hl-line-mode 1)
 
   (global-auto-revert-mode 1)
   (setq auto-revert-verbose nil)
+
   (fset 'yes-or-no-p 'y-or-n-p)
   (setq savehist-additional-variables '(register-alist))
   (savehist-mode 1)
 
-  (setq mouse-wheel-scroll-amount '(1 ((shift) . 1)))
-  (setq mouse-wheel-progressive-speed nil)
-  (setq mouse-wheel-follow-mouse t)
-  (setq scroll-margin 5)
-  (setq scroll-step 1)
-  (setq scroll-conservatively 10000)
-  (setq scroll-preserve-screen-position t)
+  (setq mouse-wheel-scroll-amount '(1 ((shift) . 1))
+        mouse-wheel-progressive-speed nil
+        mouse-wheel-follow-mouse t
+        scroll-margin 5
+        scroll-step 1
+        scroll-conservatively 10000
+        scroll-preserve-screen-position t)
 
   (custom-set-variables
-   '(uniquify-buffer-name-style (quote post-forward) nil (uniquify)))
+   '(uniquify-buffer-name-style 'post-forward nil (uniquify)))
 
-  ;; Navigation
+  ;; Navigation helpers
   (defun scroll-half-page-down ()
-    "scroll down half the page"
     (interactive)
     (scroll-down (/ (window-body-height) 2)))
 
   (defun scroll-half-page-up ()
-    "scroll up half the page"
     (interactive)
     (scroll-up (/ (window-body-height) 2)))
 
@@ -161,8 +200,7 @@
   (defun move-text-internal (arg)
     (cond
      ((and mark-active transient-mark-mode)
-      (if (> (point) (mark))
-          (exchange-point-and-mark))
+      (when (> (point) (mark)) (exchange-point-and-mark))
       (let ((column (current-column))
             (text (delete-and-extract-region (point) (mark))))
         (forward-line arg)
@@ -179,19 +217,11 @@
           (transpose-lines arg))
         (forward-line -1)))))
 
-  (defun move-text-down (arg)
-    "Move region (transient-mark-mode active) or current line arg lines down."
-    (interactive "*p")
-    (move-text-internal arg))
-
-  (defun move-text-up (arg)
-    "Move region (transient-mark-mode active) or current line arg lines up."
-    (interactive "*p")
-    (move-text-internal (- arg)))
+  (defun move-text-down (arg) (interactive "*p") (move-text-internal arg))
+  (defun move-text-up   (arg) (interactive "*p") (move-text-internal (- arg)))
 
   ;; Files
   (defun open-file-at-point ()
-    "Open the file name at point. Supports ~/ and ./ paths."
     (interactive)
     (require 'ffap)
     (let ((file (or (ffap-file-at-point) (thing-at-point 'filename t))))
@@ -205,8 +235,7 @@
   (define-key my/c-z-map (kbd "z") my/c-z-z-map)
 
   :bind
-  (("C-z" . my/c-z-map)
-   ("C-v" . scroll-half-page-up)
+  (("C-v" . scroll-half-page-up)
    ("M-v" . scroll-half-page-down)
    ("C-x _" . maximize-window)
    ("C-c c" . project-compile)
@@ -215,8 +244,28 @@
    ("C-c C-l" . (lambda () (interactive) (duplicate-line) (next-line)))
    ("C-c o" . open-file-at-point)
    ("C-c C-o" . browse-url-at-point)
-   ("C-S-n" . move-text-down)
-   ("C-S-p" . move-text-up)))
+   ("C-M-<down>" . move-text-down)
+   ("C-M-<up>" . move-text-up)))
+
+;; Tab-bar
+(use-package tab-bar
+  :ensure nil
+  :demand t
+  :init
+  (tab-bar-mode 1)
+  :custom
+  (tab-bar-close-button-show nil)
+  (tab-bar-new-button-show nil)
+  (tab-bar-show nil)
+  (tab-bar-new-tab-choice "*scratch*")
+  (tab-bar-new-tab-name-function #'my/tab-context-name)
+  :config
+  (set-face-attribute 'tab-bar nil :height 160)
+  (add-hook 'buffer-list-update-hook #'my/tab-auto-rename)
+  (with-eval-after-load 'project
+    (add-hook 'project-switch-hook #'my/tab-auto-rename))
+  :bind
+  (("C-x t R" . my/tab-rename-to-context)))
 
 ;; Grep
 (use-package wgrep
@@ -259,23 +308,24 @@
   (editorconfig-mode 1))
 
 ;; Theme/UI
-(defun my/toggle-transparency-black-bg ()
+(defvar my/saved-themes nil)
+(defun my/toggle-transparency ()
   (interactive)
   (when (display-graphic-p)
     (let* ((raw (frame-parameter nil 'alpha))
-           (alpha (cond ((numberp raw) raw)
-                        ((consp raw) (car raw))
-                        ((and (listp raw) (numberp (car raw))) (car raw))
-                        (t 100)))
-           (on? (= alpha 100))
-           (a (if on? 72 100)))
-      (set-frame-parameter nil 'alpha (cons a a))
+           (alpha (if (consp raw) (car raw) (or raw 100)))
+           (on? (= alpha 100)))
+      (set-frame-parameter nil 'alpha (if on? '(72 . 72) '(100 . 100)))
       (if on?
-          (set-face-background 'default "#000000")
-        (mapc (lambda (theme) (load-theme theme t)) custom-enabled-themes)))))
+          (progn
+            (setq my/saved-themes custom-enabled-themes)
+            (set-face-background 'default "#000000"))
+        (progn
+          (set-face-background 'default nil)
+          (mapc #'disable-theme custom-enabled-themes)
+          (mapc #'enable-theme (reverse my/saved-themes)))))))
 
-(global-set-key (kbd "C-c T") #'my/toggle-transparency-black-bg)
-(my/toggle-transparency-black-bg)
+(global-set-key (kbd "C-c T") #'my/toggle-transparency)
 
 (use-package minimal-dashboard
   :vc (:url "https://github.com/dheerajshenoy/minimal-dashboard.el"
@@ -317,7 +367,19 @@
     (set-face-attribute
      'mode-line-inactive nil
      :box `(:line-width 6 :color ,bg)))
-  (mood-line-mode))
+
+  (defun my/mode-line-context ()
+    "Project name or fallback to directory name (mode line)."
+    (propertize (format "[%s]" (my/tab-context-name))
+                'face 'mode-line-emphasis))
+
+  (mood-line-mode)
+
+  (with-eval-after-load 'mood-line
+    (setq-default mode-line-format
+                  (list
+                   '(:eval (my/mode-line-context))
+                   '(:eval (mood-line--process-format mood-line-format))))))
 
 ;; IBuffer
 (use-package ibuffer
@@ -363,6 +425,15 @@
          ("C-c / n" . ibuffer-filter-by-name)
          ("C-c / f" . ibuffer-filter-by-filename)
          ("C-c / c" . ibuffer-clear-filter-groups)))
+
+(use-package bufferlo
+  :ensure t
+  :init (bufferlo-mode 1)
+  :bind (("C-x b" . bufferlo-switch-to-buffer)
+         ("C-x B" . switch-to-buffer)
+         ("C-x C-M-b" . bufferlo-ibuffer-orphans)
+         ("C-x C-b" . bufferlo-ibuffer)
+         ("C-x C-S-B" . ibuffer)))
 
 ;; Eshell
 (use-package eshell
@@ -536,7 +607,7 @@
          ([remap Info-search] . consult-info)
          ;; C-x bindings in `ctl-x-map'
          ("C-x M-:" . consult-complex-command)     ;; orig. repeat-complex-command
-         ("C-x b" . consult-buffer)                ;; orig. switch-to-buffer
+         ;; ("C-x b" . consult-buffer)                ;; orig. switch-to-buffer
          ("C-x 4 b" . consult-buffer-other-window) ;; orig. switch-to-buffer-other-window
          ("C-x 5 b" . consult-buffer-other-frame)  ;; orig. switch-to-buffer-other-frame
          ("C-x t b" . consult-buffer-other-tab)    ;; orig. switch-to-buffer-other-tab
@@ -839,6 +910,11 @@
   (setq org-startup-folded 'content
         org-startup-indented t
         org-hide-emphasis-markers t))
+
+(use-package valign
+  :ensure t
+  :hook ((org-mode-hook . valign-mode))
+  :custom (valign-fancy-bar t))
 
 ;; Media
 (use-package mpvi
