@@ -319,7 +319,7 @@ Won't clobber a manually renamed tab."
     (let* ((raw (frame-parameter nil 'alpha))
            (alpha (if (consp raw) (car raw) (or raw 100)))
            (on? (= alpha 100)))
-      (set-frame-parameter nil 'alpha (if on? '(72 . 72) '(100 . 100)))
+      (set-frame-parameter nil 'alpha (if on? '(80 . 80) '(100 . 100)))
       (if on?
           (progn
             (setq my/saved-themes custom-enabled-themes)
@@ -483,10 +483,8 @@ Won't clobber a manually renamed tab."
   :config
   (make-directory desktop-dirname t)
   (desktop-save-mode 1)
-  (add-hook 'window-setup-hook
-            (lambda ()
-              (remove-hook 'window-setup-hook #'desktop-read)
-              (desktop-read))))
+  ;; desktop-save-mode already loads the desktop on startup; avoid reloading.
+  (remove-hook 'window-setup-hook #'desktop-read))
 
 ;; Eshell
 (use-package eshell
@@ -937,7 +935,6 @@ Won't clobber a manually renamed tab."
 
 (use-package ready-player
   :ensure t
-  :after dired-preview
   :custom
   (ready-player-autoplay nil)
   (ready-player-thumbnail-max-pixel-height 600)
@@ -962,7 +959,8 @@ Won't clobber a manually renamed tab."
         (goto-char (point-min))
         (recenter 0))))
   (advice-add 'dired-preview-display-file :after #'my/dired-preview-recenter)
-  :bind (("C-c p" . dired-preview-mode)))
+  :bind (:map dired-mode-map
+              ("C-c p" . dired-preview-mode)))
 
 ;; Org
 (use-package org
@@ -979,6 +977,38 @@ Won't clobber a manually renamed tab."
   :ensure t
   :hook ((org-mode-hook . valign-mode))
   :custom (valign-fancy-bar t))
+
+;; Translate
+(use-package gt
+  :ensure t
+  :config
+  (setq gt-langs '(auto ru))
+
+  (setq gt-default-translator
+        (gt-translator
+         :taker (gt-taker
+                 :text (lambda () (or (current-kill 0 t) ""))
+                 :prompt t
+                 :pick nil)
+         :engines (list (gt-google-engine))
+         :render (gt-buffer-render
+                  :name "*gt*"
+                  :then (lambda ()
+                          (with-current-buffer "*gt*"
+                            (visual-line-mode 1)
+                            (setq-local word-wrap t)
+                            (setq-local truncate-lines nil)
+                            (local-set-key (kbd "q") #'quit-window))))))
+
+  (add-to-list 'display-buffer-alist
+               '("\\*gt\\*"
+                 (display-buffer-in-side-window)
+                 (side . right)
+                 (slot . 0)
+                 (window-width . 40)))
+
+  :bind (("C-M-y" . gt-translate)))
+
 
 ;; EAF
 (use-package eaf
@@ -1003,13 +1033,12 @@ Won't clobber a manually renamed tab."
 
   (defalias 'browse-web #'eaf-open-browser)
 
-  (defun adviser-find-file (orig-fn file &rest args)
-    (let ((fn (if (commandp 'eaf-open) #'eaf-open orig-fn)))
-      (pcase (file-name-extension file)
-        ((or "pdf" "epub") (funcall fn file))
-        (_ (apply orig-fn file args)))))
+  (defun my/eaf-disable-header-line ()
+    "Disable header line in EAF buffers."
+    (setq-local header-line-format nil)
+    (setq-local mode-line-format nil))
 
-  (advice-add #'find-file :around #'adviser-find-file)
+  (add-hook 'eaf-mode-hook #'my/eaf-disable-header-line)
 
   :bind (("C-c C-o" . eaf-open-url-at-point)
          :map my/c-z-z-map
