@@ -16,7 +16,6 @@ This config assumes Emacs 30+ (built-in tree-sitter).
 #+begin_src bash
   git clone https://git.savannah.gnu.org/git/emacs.git
   cd emacs
-  git checkout emacs-30.2
   ./autogen.sh
   ./configure --prefix=/usr/local --with-x --with-x-toolkit=gtk3 --without-pgtk --with-native-compilation --with-tree-sitter --with-modules --with-cairo --with-imagemagick --with-xft
   make -j$(nproc)
@@ -33,14 +32,13 @@ This config assumes Emacs 30+ (built-in tree-sitter).
 
 *** Windows
 
-- [[https://www.libvips.org/install.html][libvips]] (Dirvish image preview)
-- Extra tools:
 #+begin_src bash
   choco install gnuwin
 #+end_src
 
 *** Shell tools
 
+- git
 - [[https://bun.com/docs/installation][bun]] and [[https://nodejs.org/en/download][npm]]
 - [[https://www.python.org/downloads/][python]] and [[https://docs.astral.sh/uv/getting-started/installation/][uv]]
 - [[https://github.com/BurntSushi/ripgrep#installation][ripgrep]]
@@ -53,7 +51,8 @@ This config assumes Emacs 30+ (built-in tree-sitter).
 *** Optional
 
 - Maple Mono / Maple Mono NF (GUI font)
-- mpv (for mpvi)
+- mpv (video player)
+- [[https://www.libvips.org/install.html][libvips]] (image preview)
 
 ** LSP (lsp-bridge)
 
