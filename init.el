@@ -10,6 +10,9 @@
 (defvar my/gc-cons-threshold-orig gc-cons-threshold)
 (defvar my/gc-cons-percentage-orig gc-cons-percentage)
 
+(with-eval-after-load 'warnings
+  (add-to-list 'warning-suppress-types '(files)))
+
 ;; Font
 (when (display-graphic-p)
   (when (find-font (font-spec :family "Maple Mono"))
@@ -81,7 +84,7 @@
 ;; Tab naming helpers
 (defun my/tab-context-name ()
   "Project name or fallback to directory name."
-  (or (when-let ((proj (project-current nil)))
+  (or (when-let* ((proj (project-current nil)))
         (file-name-nondirectory
          (directory-file-name (project-root proj))))
       (file-name-nondirectory
@@ -244,8 +247,8 @@ Won't clobber a manually renamed tab."
    ("C-c C-l" . (lambda () (interactive) (duplicate-line) (next-line)))
    ("C-c o" . open-file-at-point)
    ("C-c C-o" . browse-url-at-point)
-   ("C-M-<down>" . move-text-down)
-   ("C-M-<up>" . move-text-up)))
+   ("M-<down>" . move-text-down)
+   ("M-<up>" . move-text-up)))
 
 ;; Tab-bar
 (use-package tab-bar
@@ -260,6 +263,7 @@ Won't clobber a manually renamed tab."
   (tab-bar-new-tab-choice "*scratch*")
   (tab-bar-new-tab-name-function #'my/tab-context-name)
   :config
+  (tab-bar-history-mode 1)
   (set-face-attribute 'tab-bar nil :height 160)
   (add-hook 'buffer-list-update-hook #'my/tab-auto-rename)
   (with-eval-after-load 'project
@@ -354,18 +358,15 @@ Won't clobber a manually renamed tab."
   (setq lambda-themes-set-italic-comments t
         lambda-themes-set-italic-keywords t
         lambda-themes-set-variable-pitch t)
-  (load-theme 'lambda-dark t))
+  (load-theme 'lambda-dark t)
+  (my/toggle-transparency))
 
 (use-package mood-line
   :ensure t
   :config
-  (let ((bg (face-background 'mode-line nil t)))
+  (let ((bg (face-background 'header-line nil t)))
     (set-face-attribute
-     'mode-line nil
-     :box `(:line-width 6 :color ,bg)))
-  (let ((bg (face-background 'mode-line-inactive nil t)))
-    (set-face-attribute
-     'mode-line-inactive nil
+     'header-line nil
      :box `(:line-width 6 :color ,bg)))
 
   (defun my/mode-line-context ()
@@ -374,12 +375,11 @@ Won't clobber a manually renamed tab."
                 'face 'mode-line-emphasis))
 
   (mood-line-mode)
-
-  (with-eval-after-load 'mood-line
-    (setq-default mode-line-format
-                  (list
-                   '(:eval (my/mode-line-context))
-                   '(:eval (mood-line--process-format mood-line-format))))))
+  (setq-default mode-line-format nil)
+  (setq-default header-line-format
+                (list
+                 '(:eval (my/mode-line-context))
+                 '(:eval (mood-line--process-format mood-line-format)))))
 
 ;; IBuffer
 (use-package ibuffer
@@ -428,12 +428,65 @@ Won't clobber a manually renamed tab."
 
 (use-package bufferlo
   :ensure t
-  :init (bufferlo-mode 1)
+  :after ibuffer
+  :init
+  (bufferlo-mode)
+  :config
   :bind (("C-x b" . bufferlo-switch-to-buffer)
-         ("C-x B" . switch-to-buffer)
+         ("C-x B" . bufferlo-find-buffer-switch)
          ("C-x C-M-b" . bufferlo-ibuffer-orphans)
          ("C-x C-b" . bufferlo-ibuffer)
-         ("C-x C-S-B" . ibuffer)))
+         ("C-x C-S-B" . ibuffer)
+         ("C-x t 0" . bufferlo-tab-close-kill-buffers)))
+
+;; Completion
+
+(use-package corfu
+  :ensure t
+  :custom
+  (corfu-auto nil)
+  (corfu-cycle t)
+  (corfu-preselect 'prompt)
+  (corfu-quit-no-match 'separator)
+  :hook
+  ((shell-mode eshell-mode agent-shell-mode) . corfu-mode))
+
+;; Desktop (restore session)
+(use-package desktop
+  :ensure nil
+  :init
+  (setq desktop-dirname             (expand-file-name "desktop/" user-emacs-directory)
+        desktop-base-file-name      "desktop"
+        desktop-base-lock-name      "lock"
+        desktop-path               (list desktop-dirname)
+        desktop-save               t
+        desktop-load-locked-desktop t
+        desktop-restore-frames      t)
+
+  (setq desktop-files-not-to-save
+        (concat desktop-files-not-to-save
+                "\\|\\`/ssh:"
+                "\\|\\`/sudo:"
+                "\\|\\`/docker:"
+                "\\|\\`/scp:"
+                "\\|\\`/rsync:"))
+
+  (setq desktop-buffers-not-to-save
+        (concat "\\` "
+                "\\|\\`\\*Messages\\*\\'"
+                "\\|\\`\\*scratch\\*\\'"
+                "\\|\\`\\*Help\\*\\'"
+                "\\|\\`\\*Compile-Log\\*\\'"
+                "\\|\\`\\*Warnings\\*\\'"
+                "\\|\\`\\*Async-native-compile-log\\*\\'"
+                "\\|\\`\\*tramp/.*\\*\\'"))
+  :config
+  (make-directory desktop-dirname t)
+  (desktop-save-mode 1)
+  (add-hook 'window-setup-hook
+            (lambda ()
+              (remove-hook 'window-setup-hook #'desktop-read)
+              (desktop-read))))
 
 ;; Eshell
 (use-package eshell
@@ -444,19 +497,6 @@ Won't clobber a manually renamed tab."
                                '(("la" "ls -Alhvp --group-directories-first --color=always")
                                  ("py" "uv run python")))))
   :init
-  (use-package corfu
-    :ensure t
-    :custom
-    (corfu-auto nil)
-    (corfu-cycle t)
-    (corfu-preselect 'prompt)
-    (corfu-quit-no-match 'separator)
-    :hook
-    ((shell-mode eshell-mode) . corfu-mode)
-    (shell-mode . (lambda ()
-                    (setq-local corfu-auto-delay 0.2
-                                corfu-auto-prefix 2))))
-
   (use-package vterm
     :ensure t
     :commands (vterm)
@@ -467,6 +507,32 @@ Won't clobber a manually renamed tab."
     :ensure t
     :commands (eat eat-eshell-mode)
     :hook (eshell-mode . eat-eshell-mode))
+
+  (use-package bash-completion
+    :ensure t
+    :if (not (eq system-type 'windows-nt))
+    :after eshell
+    :if (or (and (eq system-type 'gnu/linux)
+                 (executable-find "bash"))
+            (and (eq system-type 'windows-nt)
+                 (executable-find "wsl.exe")))
+    :config
+    (when (eq system-type 'windows-nt)
+      (setq bash-completion-prog "wsl.exe")
+      (setq bash-completion-args '("--" "bash")))
+    (defun +eshell-bash-completion-capf-nonexclusive ()
+      (let* ((bol-pos (save-mark-and-excursion
+                        (eshell-bol)
+                        (point)))
+             (compl (bash-completion-dynamic-complete-nocomint
+                     bol-pos
+                     (point) t)))
+        (when compl
+          (append compl '(:exclusive no)))))
+    (defun +eshell-setup-bash-completion-h ()
+      (add-hook 'completion-at-point-functions
+                #'+eshell-bash-completion-capf-nonexclusive nil t))
+    (add-hook 'eshell-mode-hook #'+eshell-setup-bash-completion-h))
 
   (require 'seq)
   (require 'subr-x)
@@ -566,34 +632,6 @@ Won't clobber a manually renamed tab."
             (lambda ()
               (keymap-set eshell-mode-map "C-r" #'my/eshell-history-fuzzy)
               (keymap-set eshell-mode-map "C-l" #'eshell/clear))))
-
-(use-package bash-completion
-  :ensure t
-  :if (not (eq system-type 'windows-nt))
-  :after eshell
-  :if (or (and (eq system-type 'gnu/linux)
-               (executable-find "bash"))
-          (and (eq system-type 'windows-nt)
-               (executable-find "wsl.exe")))
-  :config
-  (when (eq system-type 'windows-nt)
-    (setq bash-completion-prog "wsl.exe")
-    (setq bash-completion-args '("--" "bash")))
-
-  (defun +eshell-bash-completion-capf-nonexclusive ()
-    (let* ((bol-pos (save-mark-and-excursion
-                      (eshell-bol)
-                      (point)))
-           (compl (bash-completion-dynamic-complete-nocomint
-                   bol-pos
-                   (point) t)))
-      (when compl
-        (append compl '(:exclusive no)))))
-
-  (defun +eshell-setup-bash-completion-h ()
-    (add-hook 'completion-at-point-functions
-              #'+eshell-bash-completion-capf-nonexclusive nil t))
-  (add-hook 'eshell-mode-hook #'+eshell-setup-bash-completion-h))
 
 ;; Consult
 (use-package consult
@@ -889,8 +927,6 @@ Won't clobber a manually renamed tab."
   :hook (dired-mode . (lambda () (display-line-numbers-mode -1)))
   :custom
   (dirvish-attributes '(vc-state subtree-state collapse git-msg file-size file-time))
-  (dirvish-preview-dispatchers '(image video audio archive pdf))
-  (dirvish-default-layout '(0 0.35 0.65))
   (dired-listing-switches "-alh --group-directories-first")
   :config (dirvish-side-follow-mode)
   :bind (:map dirvish-mode-map
@@ -898,6 +934,35 @@ Won't clobber a manually renamed tab."
               ("h" . dired-up-directory)
               ("l" . dired-find-file)
               ("<backtab>" . dirvish-layout-toggle)))
+
+(use-package ready-player
+  :ensure t
+  :after dired-preview
+  :custom
+  (ready-player-autoplay nil)
+  (ready-player-thumbnail-max-pixel-height 600)
+  :config (ready-player-mode))
+
+(use-package dired-preview
+  :ensure t
+  :custom
+  (dired-preview-delay 0.2)
+  (dired-preview-max-size (expt 2 20))
+  (dired-preview-ignored-extensions-regexp nil)
+  :config
+  (defun my/dired-preview-display-action-alist ()
+    `((display-buffer-in-side-window)
+      (side . right)
+      (window-width . 0.65)))
+  (setq dired-preview-display-action-alist #'my/dired-preview-display-action-alist)
+  (defun my/dired-preview-recenter (file)
+    (when-let* ((buf (dired-preview--get-preview-buffer file))
+                (win (get-buffer-window buf)))
+      (with-selected-window win
+        (goto-char (point-min))
+        (recenter 0))))
+  (advice-add 'dired-preview-display-file :after #'my/dired-preview-recenter)
+  :bind (("C-c p" . dired-preview-mode)))
 
 ;; Org
 (use-package org
@@ -907,22 +972,13 @@ Won't clobber a manually renamed tab."
          (org-mode . org-indent-mode)
          (org-mode . (lambda () (display-line-numbers-mode -1))))
   :config
-  (setq org-startup-folded 'content
-        org-startup-indented t
+  (setq org-startup-indented t
         org-hide-emphasis-markers t))
 
 (use-package valign
   :ensure t
   :hook ((org-mode-hook . valign-mode))
   :custom (valign-fancy-bar t))
-
-;; Media
-(use-package mpvi
-  :ensure t
-  :init (use-package emms :ensure t)
-  :custom (mpvi-mpv-ontop-p t)
-  :bind (("C-z C-v" . mpvi-play)
-         ("C-z v s" . mpvi-speed)))
 
 ;; EAF
 (use-package eaf
@@ -962,3 +1018,146 @@ Won't clobber a manually renamed tab."
          ("h" . eaf-open-browser-with-history)
          ("s" . eaf-search-it)
          ("p" . eaf-open-pdf-from-history)))
+
+;;; --- Smart open: EAF for PDFs, system apps for audio/video/images/etc ---
+(require 'seq)
+(require 'subr-x)
+(require 'mailcap)
+
+(defgroup my/open nil "My file opening rules." :group 'convenience)
+
+(defcustom my/open-with-eaf-exts '("pdf" "epub")
+  "File extensions to open via EAF."
+  :type '(repeat string)
+  :group 'my/open)
+
+(defcustom my/open-with-system-exts
+  '("png" "jpg" "jpeg" "gif" "webp" "svg"
+    "mp4" "mkv" "mov" "webm" "avi" "m4v"
+    "mp3" "flac" "wav" "ogg" "m4a" "opus"
+    "zip" "7z" "rar" "tar" "gz" "bz2" "xz")
+  "File extensions to open via system default apps (fallback)."
+  :type '(repeat string)
+  :group 'my/open)
+
+(defcustom my/open-media-players
+  '(("mpv.desktop" . "mpv")
+    ("vlc.desktop" . "vlc")
+    ("org.gnome.Celluloid.desktop" . "celluloid"))
+  "Preferred media players when xdg-mime default matches a desktop entry."
+  :type '(alist :key-type string :value-type string)
+  :group 'my/open)
+
+(defcustom my/dirvish-video-thumb-size 640
+  "Max width (px) for Dirvish video thumbnails."
+  :type 'integer
+  :group 'dirvish)
+
+(defun my/file-ext (path)
+  (downcase (or (file-name-extension path) "")))
+
+(defun my/local-file-p (path)
+  (and path
+       (not (file-remote-p path))
+       (file-exists-p path)))
+
+(defun my/mime-type (path)
+  (or (mailcap-file-name-to-mime-type path) ""))
+
+(defun my/xdg-mime-default (mime)
+  (when (and (stringp mime) (not (string-empty-p mime))
+             (executable-find "xdg-mime"))
+    (with-temp-buffer
+      (when (eq 0 (call-process "xdg-mime" nil t nil "query" "default" mime))
+        (string-trim (buffer-string))))))
+
+(defun my/media-file-p (path)
+  (and (my/local-file-p path)
+       (let ((mt (my/mime-type path)))
+         (or (string-prefix-p "video/" mt)
+             (string-prefix-p "audio/" mt)))))
+
+(defun my/open-media-direct (path)
+  (let* ((mime (my/mime-type path))
+         (desk (my/xdg-mime-default mime))
+         (cmd  (and desk (cdr (assoc desk my/open-media-players)))))
+    (when (and cmd (executable-find cmd))
+      (make-process :name "my-open-media" :command (list cmd path) :noquery t)
+      t)))
+
+(defun my/open-in-system-app (path)
+  (unless (my/local-file-p path)
+    (user-error "Not a local existing file: %s" path))
+  (pcase system-type
+    ('darwin
+     (make-process :name "my-open" :command (list "open" path) :noquery t))
+    ('windows-nt
+     (w32-shell-execute "open" (replace-regexp-in-string "/" "\\" path t t)))
+    (_
+     (cond
+      ((and (my/media-file-p path)
+            (my/open-media-direct path))
+       t)
+      ((executable-find "gio")
+       (make-process :name "my-open" :command (list "gio" "open" path) :noquery t))
+      ((executable-find "xdg-open")
+       (make-process :name "my-open" :command (list "xdg-open" path) :noquery t))
+      (t
+       (user-error "No opener found (need xdg-open or gio)"))))))
+
+(defun my/open-file-smart (path)
+  (let* ((path (expand-file-name path))
+         (ext  (my/file-ext path)))
+    (cond
+     ((member ext my/open-with-eaf-exts)
+      (require 'eaf)
+      (require 'eaf-pdf-viewer nil t)
+      (require 'eaf-browser nil t)
+      (eaf-open path)
+      t)
+
+     ((my/media-file-p path)
+      (my/open-in-system-app path)
+      t)
+
+     ((and (my/local-file-p path)
+           (member ext my/open-with-system-exts))
+      (my/open-in-system-app path)
+      t)
+
+     (t nil))))
+
+(defun my/find-file-around (orig file &rest args)
+  "Route some file types to EAF or system apps."
+  (let ((path (and file (expand-file-name file))))
+    (if (and path (my/open-file-smart path))
+        nil
+      (apply orig file args))))
+
+(advice-add 'find-file :around #'my/find-file-around)
+
+(with-eval-after-load 'dired
+  (defun my/dired-find-file-around (orig &rest args)
+    (let ((path (dired-get-file-for-visit)))
+      (if (my/open-file-smart path)
+          nil
+        (apply orig args))))
+  (advice-add 'dired-find-file :around #'my/dired-find-file-around)
+
+  (defun my/dired-do-find-marked-files-around (orig &rest args)
+    (let ((files (dired-get-marked-files)))
+      ;; If every marked file is handled externally, don't call orig
+      (if (and files (seq-every-p #'my/open-file-smart files))
+          nil
+        (apply orig args))))
+  (advice-add 'dired-do-find-marked-files :around #'my/dired-do-find-marked-files-around))
+
+(defun my/open-current-file-externally ()
+  "Open current file (or Dired file at point) in system default app."
+  (interactive)
+  (let ((path (or buffer-file-name
+                  (and (derived-mode-p 'dired-mode) (dired-get-file-for-visit)))))
+    (unless path (user-error "No file here"))
+    (my/open-in-system-app (expand-file-name path))))
+
+(global-set-key (kbd "C-c x") #'my/open-current-file-externally)
