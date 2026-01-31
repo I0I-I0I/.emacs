@@ -483,10 +483,8 @@ Won't clobber a manually renamed tab."
   :config
   (make-directory desktop-dirname t)
   (desktop-save-mode 1)
-  (add-hook 'window-setup-hook
-            (lambda ()
-              (remove-hook 'window-setup-hook #'desktop-read)
-              (desktop-read))))
+  ;; desktop-save-mode already loads the desktop on startup; avoid reloading.
+  (remove-hook 'window-setup-hook #'desktop-read))
 
 ;; Eshell
 (use-package eshell
@@ -937,7 +935,6 @@ Won't clobber a manually renamed tab."
 
 (use-package ready-player
   :ensure t
-  :after dired-preview
   :custom
   (ready-player-autoplay nil)
   (ready-player-thumbnail-max-pixel-height 600)
@@ -962,7 +959,8 @@ Won't clobber a manually renamed tab."
         (goto-char (point-min))
         (recenter 0))))
   (advice-add 'dired-preview-display-file :after #'my/dired-preview-recenter)
-  :bind (("C-c p" . dired-preview-mode)))
+  :bind (:map dired-mode-map
+              ("C-c p" . dired-preview-mode)))
 
 ;; Org
 (use-package org
