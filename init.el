@@ -10,8 +10,11 @@
 (defvar my/gc-cons-threshold-orig gc-cons-threshold)
 (defvar my/gc-cons-percentage-orig gc-cons-percentage)
 
-(with-eval-after-load 'warnings
-  (add-to-list 'warning-suppress-types '(files)))
+(set-language-environment 'utf-8)
+(set-locale-environment "utf-8")
+
+(setq buffer-file-coding-system 'utf-8)
+(prefer-coding-system 'utf-8)
 
 ;; Font
 (when (display-graphic-p)
@@ -187,8 +190,8 @@ Won't clobber a manually renamed tab."
         scroll-conservatively 10000
         scroll-preserve-screen-position t)
 
-  (custom-set-variables
-   '(uniquify-buffer-name-style 'post-forward nil (uniquify)))
+  (require 'uniquify)
+  (setq uniquify-buffer-name-style 'post-forward)
 
   ;; Navigation helpers
   (defun scroll-half-page-down ()
@@ -440,7 +443,6 @@ Won't clobber a manually renamed tab."
          ("C-x t 0" . bufferlo-tab-close-kill-buffers)))
 
 ;; Completion
-
 (use-package corfu
   :ensure t
   :custom
@@ -448,8 +450,9 @@ Won't clobber a manually renamed tab."
   (corfu-cycle t)
   (corfu-preselect 'prompt)
   (corfu-quit-no-match 'separator)
+  :init (global-corfu-mode)
   :hook
-  ((shell-mode eshell-mode agent-shell-mode) . corfu-mode))
+  (lsp-bridge-mode . (lambda () (corfu-mode -1))))
 
 ;; Desktop (restore session)
 (use-package desktop
@@ -481,9 +484,9 @@ Won't clobber a manually renamed tab."
                 "\\|\\`\\*Async-native-compile-log\\*\\'"
                 "\\|\\`\\*tramp/.*\\*\\'"))
   :config
+  (with-eval-after-load 'desktop (require 'org))
   (make-directory desktop-dirname t)
   (desktop-save-mode 1)
-  ;; desktop-save-mode already loads the desktop on startup; avoid reloading.
   (remove-hook 'window-setup-hook #'desktop-read))
 
 ;; Eshell
@@ -508,12 +511,9 @@ Won't clobber a manually renamed tab."
 
   (use-package bash-completion
     :ensure t
-    :if (not (eq system-type 'windows-nt))
+    :if (or (and (eq system-type 'gnu/linux) (executable-find "bash"))
+            (and (eq system-type 'windows-nt) (executable-find "wsl.exe")))
     :after eshell
-    :if (or (and (eq system-type 'gnu/linux)
-                 (executable-find "bash"))
-            (and (eq system-type 'windows-nt)
-                 (executable-find "wsl.exe")))
     :config
     (when (eq system-type 'windows-nt)
       (setq bash-completion-prog "wsl.exe")
@@ -590,7 +590,6 @@ Won't clobber a manually renamed tab."
          ("C-x p e" . my/toggle-eshell-project))
 
   :config
-  (advice-add 'eshell-browse-url :override #'ignore)
   (setq eshell-visual-commands '()
         shell-browse-url-functions nil
         eshell-cmpl-cycle-completions nil
@@ -604,8 +603,6 @@ Won't clobber a manually renamed tab."
         eshell-scroll-show-maximum-output t
         eshell-hist-ignoredups t
         eshell-prefer-lisp-functions nil)
-
-  (advice-add 'browse-url :before (lambda (&rest _) (backtrace)))
 
   (defun eshell/o (&rest args)
     (let ((target (string-join args " ")))
@@ -783,6 +780,21 @@ Won't clobber a manually renamed tab."
             :rev :newest
             :branch "master")
   :demand t
+  :hook ((python-mode
+          python-ts-mode
+          web-mode
+          js-mode
+          js-ts-mode
+          typescript-mode
+          typescript-ts-mode
+          tsx-ts-mode
+          css-mode
+          css-ts-mode
+          json-mode
+          json-ts-mode
+          yaml-mode
+          yaml-ts-mode
+          emacs-lisp-mode) . lsp-bridge-mode)
   :init
   (use-package markdown-mode
     :ensure t)
@@ -836,7 +848,6 @@ Won't clobber a manually renamed tab."
 
   (defun my/lsp-bridge-xref-backend () 'lsp-bridge)
   (add-hook 'lsp-bridge-mode-hook (lambda () (add-hook 'xref-backend-functions #'my/lsp-bridge-xref-backend nil t)))
-  (global-lsp-bridge-mode)
   :bind (:map lsp-bridge-mode-map
               ("M-."   . lsp-bridge-find-def)
               ("C-c M-." . lsp-bridge-find-type-def)
@@ -981,31 +992,44 @@ Won't clobber a manually renamed tab."
 ;; Translate
 (use-package gt
   :ensure t
+  :init
+  (use-package posframe :ensure t)
+
   :config
   (setq gt-langs '(auto ru))
+  (require 'gt-render-posframe)
 
   (setq gt-default-translator
         (gt-translator
          :taker (gt-taker
-                 :text (lambda () (or (current-kill 0 t) ""))
-                 :prompt t
+                 :text (lambda ()
+                         (if (use-region-p)
+                             (buffer-substring-no-properties
+                              (region-beginning) (region-end))
+                           (or (current-kill 0 t) "")))
+                 :prompt nil
                  :pick nil)
          :engines (list (gt-google-engine))
-         :render (gt-buffer-render
-                  :name "*gt*"
-                  :then (lambda ()
-                          (with-current-buffer "*gt*"
-                            (visual-line-mode 1)
-                            (setq-local word-wrap t)
-                            (setq-local truncate-lines nil)
-                            (local-set-key (kbd "q") #'quit-window))))))
+         :render (gt-posframe-pop-render
+                  :padding 10
+                  :forecolor "#ffffff"
+                  :backcolor "#222222"
+                  :frame-params (list :border-width 1))))
+  ;; :render (gt-buffer-render
+  ;;          :name "*gt*"
+  ;;          :then (lambda ()
+  ;;                  (with-current-buffer "*gt*"
+  ;;                    (visual-line-mode 1)
+  ;;                    (setq-local word-wrap t)
+  ;;                    (setq-local truncate-lines nil)
+  ;;                    (local-set-key (kbd "q") #'quit-window))))))
 
-  (add-to-list 'display-buffer-alist
-               '("\\*gt\\*"
-                 (display-buffer-in-side-window)
-                 (side . right)
-                 (slot . 0)
-                 (window-width . 40)))
+  ;; (add-to-list 'display-buffer-alist
+  ;;              '("\\*gt\\*"
+  ;;                (display-buffer-in-side-window)
+  ;;                (side . right)
+  ;;                (slot . 0)
+  ;;                (window-width . 40)))
 
   :bind (("C-M-y" . gt-translate)))
 
