@@ -799,6 +799,9 @@ Won't clobber a manually renamed tab."
   (use-package markdown-mode
     :ensure t)
 
+  (use-package web-mode
+    :ensure t)
+
   (use-package yasnippet
     :vc (:url "https://github.com/joaotavora/yasnippet"
               :rev :newest
@@ -881,6 +884,18 @@ Won't clobber a manually renamed tab."
 (use-package flycheck
   :ensure t
   :init (global-flycheck-mode))
+
+(use-package flyspell
+  :ensure nil
+  :init
+  (setq ispell-program-name "hunspell"
+        ispell-dictionary "en_US"
+        flyspell-issue-message-flag nil
+        flyspell-delay 0.5
+        ispell-choices-win-default-height 20)
+  :hook
+  ((text-mode . flyspell-mode)
+   (prog-mode . flyspell-prog-mode)))
 
 (use-package apheleia
   :ensure t
@@ -1015,22 +1030,6 @@ Won't clobber a manually renamed tab."
                   :forecolor "#ffffff"
                   :backcolor "#222222"
                   :frame-params (list :border-width 1))))
-  ;; :render (gt-buffer-render
-  ;;          :name "*gt*"
-  ;;          :then (lambda ()
-  ;;                  (with-current-buffer "*gt*"
-  ;;                    (visual-line-mode 1)
-  ;;                    (setq-local word-wrap t)
-  ;;                    (setq-local truncate-lines nil)
-  ;;                    (local-set-key (kbd "q") #'quit-window))))))
-
-  ;; (add-to-list 'display-buffer-alist
-  ;;              '("\\*gt\\*"
-  ;;                (display-buffer-in-side-window)
-  ;;                (side . right)
-  ;;                (slot . 0)
-  ;;                (window-width . 40)))
-
   :bind (("C-M-y" . gt-translate)))
 
 
