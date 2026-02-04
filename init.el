@@ -899,8 +899,36 @@ Won't clobber a manually renamed tab."
 
 (use-package apheleia
   :ensure t
+  :init
+  (apheleia-global-mode +1)
+
   :config
-  (apheleia-global-mode +1))
+  (setf (alist-get 'ruff-format apheleia-formatters)
+        '("ruff" "format" "-"))
+  (setf (alist-get 'oxfmt apheleia-formatters)
+        '("oxfmt" "--stdin"))
+
+  ;; Optional: if you want Ruff to also apply safe fixes on save,
+  ;; you can run "ruff check --fix" BEFORE formatting using a "sequential" formatter.
+  ;; Uncomment if desired.
+  ;;
+  ;; (setf (alist-get 'ruff-fix+format apheleia-formatters)
+  ;;       '((:formatter "ruff" "check" "--fix" "--exit-zero" "--stdin-filename" filepath "-")
+  ;;         (:formatter "ruff" "format" "-")))
+
+  (setf (alist-get 'python-mode apheleia-mode-alist) 'ruff-format)
+  (setf (alist-get 'python-ts-mode apheleia-mode-alist) 'ruff-format)
+
+  (dolist (mode '(js-mode js-ts-mode
+                          typescript-mode typescript-ts-mode
+                          tsx-ts-mode
+                          web-mode))
+    (setf (alist-get mode apheleia-mode-alist) 'oxfmt))
+
+  (dolist (mode '(json-mode json-ts-mode))
+    (setf (alist-get mode apheleia-mode-alist) 'oxfmt))
+
+  :bind (("C-c f" . apheleia-format-buffer)))
 
 ;; DAP
 (use-package dap-mode
