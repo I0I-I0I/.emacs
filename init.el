@@ -188,6 +188,7 @@ Won't clobber a manually renamed tab."
         scroll-margin 5
         scroll-step 1
         scroll-conservatively 10000
+        fast-but-imprecise-scrolling t
         scroll-preserve-screen-position t)
 
   (require 'uniquify)
@@ -315,22 +316,150 @@ Won't clobber a manually renamed tab."
   (editorconfig-mode 1))
 
 ;; Theme/UI
-(defvar my/saved-themes nil)
+(defgroup my/transparency nil
+  "Toggle frame transparency while forcing background to black."
+  :group 'frames)
+
+(defcustom my/transparency-alpha-on 75
+  "Alpha (opacity) value used when transparency is enabled."
+  :type 'integer)
+
+(defcustom my/transparency-alpha-off 100
+  "Alpha (opacity) value used when transparency is disabled."
+  :type 'integer)
+
+(defvar my/transparency--bg-param 'my/transparency--stored-bg
+  "Frame parameter key where we store original background colors.")
+
+(defun my/transparency--alpha-param ()
+  "Return the frame parameter symbol to use for transparency."
+  (if (eq system-type 'windows-nt)
+      'alpha
+    'alpha-background))
+
+(defun my/transparency--get-face-bg (face frame)
+  "Get FACE background on FRAME (or nil if unspecified)."
+  (face-background face frame t))
+
+(defun my/transparency--set-face-bg (face bg)
+  "Set FACE background to BG (nil means reset to theme/default)."
+  (if bg
+      (set-face-background face bg nil)
+    (set-face-background face 'unspecified nil)))
+
+(defcustom my/transparency-refresh-method 'jiggle
+  "How to force-refresh the frame after changing alpha.
+- nil: do nothing
+- redraw: redraw only (lightweight, may not help)
+- jiggle: tiny resize nudge (usually fixes compositor lag)"
+  :type '(choice (const :tag "None" nil)
+                 (const :tag "Redraw" redraw)
+                 (const :tag "Jiggle resize" jiggle)))
+
+(defun my/transparency--refresh-frame (&optional frame)
+  "Force the compositor/WM to notice recent frame parameter changes."
+  (let ((frame (or frame (selected-frame))))
+    (pcase my/transparency-refresh-method
+      ('nil nil)
+      ('redraw
+       (redraw-frame frame)
+       (force-window-update frame)
+       (redisplay t))
+      ('jiggle
+       (let ((w (frame-width frame))
+             (h (frame-height frame)))
+         (run-with-idle-timer
+          0 nil
+          (lambda ()
+            (when (frame-live-p frame)
+              (ignore-errors
+                (set-frame-size frame (1+ w) h t)
+                (set-frame-size frame w h t))
+              (redraw-frame frame)
+              (force-window-update frame)
+              (redisplay t)))))))))
+
+(defun my/transparency--store-current-bgs (&optional frame)
+  "Store current background colors for key faces into FRAME parameter."
+  (let* ((frame (or frame (selected-frame)))
+         (stored (frame-parameter frame my/transparency--bg-param)))
+    (unless stored
+      (set-frame-parameter
+       frame my/transparency--bg-param
+       (list
+        (cons 'default (my/transparency--get-face-bg 'default frame))
+        (cons 'line-number (my/transparency--get-face-bg 'line-number frame))
+        (cons 'line-number-current-line (my/transparency--get-face-bg 'line-number-current-line frame))
+        (cons 'header-line (my/transparency--get-face-bg 'header-line frame)))))))
+
+(defun my/transparency--restore-bgs (&optional frame)
+  "Restore background colors from FRAME parameter."
+  (let* ((frame (or frame (selected-frame)))
+         (stored (frame-parameter frame my/transparency--bg-param)))
+    (when stored
+      (my/transparency--set-face-bg 'default (alist-get 'default stored))
+      (my/transparency--set-face-bg 'line-number (alist-get 'line-number stored))
+      (my/transparency--set-face-bg 'line-number-current-line
+                                    (alist-get 'line-number-current-line stored))
+      (my/transparency--set-face-bg 'header-line (alist-get 'header-line stored))
+      (let ((bg (alist-get 'header-line stored)))
+        (set-face-attribute 'header-line nil
+                            :box `(:line-width 6 :color ,(or bg "unspecified"))))
+      (set-frame-parameter frame my/transparency--bg-param nil))))
+
+(defun my/transparency--enabled-p (&optional frame)
+  "Non-nil if transparency is currently enabled on FRAME."
+  (let* ((frame (or frame (selected-frame)))
+         (param (my/transparency--alpha-param))
+         (raw (frame-parameter frame param))
+         (alpha (cond
+                 ((consp raw) (car raw))
+                 ((numberp raw) raw)
+                 (t my/transparency-alpha-off))))
+    (< alpha my/transparency-alpha-off)))
+
+(defun my/transparency--apply-alpha (alpha &optional frame)
+  "Set transparency ALPHA on FRAME using the right parameter."
+  (let* ((frame (or frame (selected-frame)))
+         (param (my/transparency--alpha-param)))
+    (set-frame-parameter frame param alpha)))
+
+(defun my/transparency--force-black-ui ()
+  (my/transparency--set-face-bg 'default "#000000")
+  (my/transparency--set-face-bg 'line-number "#000000")
+  (my/transparency--set-face-bg 'line-number-current-line "#000000")
+  (my/transparency--set-face-bg 'header-line "#000000")
+  (set-face-attribute 'header-line nil :box '(:line-width 6 :color "#000000")))
+
 (defun my/toggle-transparency ()
+  "Toggle transparency on the current frame, forcing background to black when enabled."
   (interactive)
-  (when (display-graphic-p)
-    (let* ((raw (frame-parameter nil 'alpha))
-           (alpha (if (consp raw) (car raw) (or raw 100)))
-           (on? (= alpha 100)))
-      (set-frame-parameter nil 'alpha (if on? '(80 . 80) '(100 . 100)))
-      (if on?
-          (progn
-            (setq my/saved-themes custom-enabled-themes)
-            (set-face-background 'default "#000000"))
+  (unless (display-graphic-p)
+    (user-error "Transparency needs a graphical frame"))
+  (let ((frame (selected-frame)))
+    (if (my/transparency--enabled-p frame)
         (progn
-          (set-face-background 'default nil)
-          (mapc #'disable-theme custom-enabled-themes)
-          (mapc #'enable-theme (reverse my/saved-themes)))))))
+          (my/transparency--apply-alpha my/transparency-alpha-off frame)
+          (my/transparency--restore-bgs frame)
+          (my/transparency--refresh-frame frame)
+          (message "Transparency: OFF"))
+      (my/transparency--store-current-bgs frame)
+      (my/transparency--force-black-ui)
+      (my/transparency--apply-alpha my/transparency-alpha-on frame)
+      (my/transparency--refresh-frame frame)
+      (message "Transparency: ON"))))
+
+(defun my/transparency--update-bg-after-theme (&rest _)
+  "If transparency is active, refresh stored background after theme change."
+  (dolist (frame (frame-list))
+    (when (my/transparency--enabled-p frame)
+      (set-frame-parameter frame my/transparency--bg-param nil)
+      (my/transparency--store-current-bgs frame)
+      (my/transparency--set-face-bg 'default "#000000")
+      (my/transparency--set-face-bg 'line-number "#000000")
+      (my/transparency--set-face-bg 'line-number-current-line "#000000"))))
+
+(advice-add 'load-theme :after #'my/transparency--update-bg-after-theme)
 
 (global-set-key (kbd "C-c T") #'my/toggle-transparency)
 
@@ -361,8 +490,7 @@ Won't clobber a manually renamed tab."
   (setq lambda-themes-set-italic-comments t
         lambda-themes-set-italic-keywords t
         lambda-themes-set-variable-pitch t)
-  (load-theme 'lambda-dark t)
-  (my/toggle-transparency))
+  (load-theme 'lambda-dark t))
 
 (use-package mood-line
   :ensure t
@@ -625,7 +753,7 @@ Won't clobber a manually renamed tab."
 
   (add-hook 'eshell-mode-hook
             (lambda ()
-              (keymap-set eshell-mode-map "C-r" #'my/eshell-history-fuzzy)
+              (keymap-set eshell-mode-map "M-r" #'my/eshell-history-fuzzy)
               (keymap-set eshell-mode-map "C-l" #'eshell/clear))))
 
 ;; Consult
@@ -635,7 +763,7 @@ Won't clobber a manually renamed tab."
          ("C-c M-x" . consult-mode-command)
          ("C-c h" . consult-history)
          ("C-c k" . consult-kmacro)
-         ("C-c m" . consult-man)
+         ("C-c M" . consult-man)
          ("C-c i" . consult-info)
          ([remap Info-search] . consult-info)
          ;; C-x bindings in `ctl-x-map'
@@ -1060,7 +1188,6 @@ Won't clobber a manually renamed tab."
                   :frame-params (list :border-width 1))))
   :bind (("C-M-y" . gt-translate)))
 
-
 ;; EAF
 (use-package eaf
   :vc (:url "https://github.com/emacs-eaf/emacs-application-framework"
@@ -1226,7 +1353,6 @@ Won't clobber a manually renamed tab."
 
   (defun my/dired-do-find-marked-files-around (orig &rest args)
     (let ((files (dired-get-marked-files)))
-      ;; If every marked file is handled externally, don't call orig
       (if (and files (seq-every-p #'my/open-file-smart files))
           nil
         (apply orig args))))
