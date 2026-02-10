@@ -1,11 +1,10 @@
 * Emacs config
-
-** Quickstart
+** Quick start
 
 1. Clone this repo into =~/.emacs.d= (or =%APPDATA%/.emacs.d= on Windows).
 2. Start Emacs once to let packages install.
-3. Run =M-x my/treesit-install= to build tree-sitter grammars.
-4. Run =M-x eaf-install= if you use EAF.
+3. Run =M-x eaf-install= if you use EAF.
+4. Set font =M-x customize-face RET default RET=
 
 ** Installation
 
@@ -29,7 +28,6 @@ This config assumes Emacs 30+ (built-in tree-sitter).
 #+end_src
 
 ** Requirements
-
 *** Windows
 
 #+begin_src bash
@@ -42,16 +40,10 @@ This config assumes Emacs 30+ (built-in tree-sitter).
 - [[https://bun.com/docs/installation][bun]] and [[https://nodejs.org/en/download][npm]]
 - [[https://www.python.org/downloads/][python]] and [[https://docs.astral.sh/uv/getting-started/installation/][uv]]
 - [[https://github.com/BurntSushi/ripgrep#installation][ripgrep]]
-#+begin_src bash
-  choco install ripgrep
-  sudo dnf install ripgrep
-  sudo pacman -S ripgrep
-#+end_src
 
 *** Optional
 
-- Maple Mono / Maple Mono NF (GUI font)
-- mpv (video player)
+- mpv/vlc (video player)
 - [[https://www.libvips.org/install.html][libvips]] (image preview)
 
 ** LSP (lsp-bridge)
@@ -72,7 +64,7 @@ This config assumes Emacs 30+ (built-in tree-sitter).
 #+begin_src bash
   bun install -g typescript-language-server typescript oxlint oxfmt vscode-langservers-extracted
 
-  uv tool install ruff pyrefly
+  uv tool install ruff ty
 #+end_src
 
 ** Windows notes
