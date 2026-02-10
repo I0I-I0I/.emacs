@@ -16,21 +16,6 @@
 (setq buffer-file-coding-system 'utf-8)
 (prefer-coding-system 'utf-8)
 
-;; Font
-(when (display-graphic-p)
-  (when (find-font (font-spec :family "Maple Mono"))
-    (set-frame-font
-     (pcase system-type
-       ('windows-nt "Maple Mono-14")
-       ('gnu/linux  "Maple Mono-18"))
-     t t))
-  (when (find-font (font-spec :family "Maple Mono NF"))
-    (set-frame-font
-     (pcase system-type
-       ('windows-nt "Maple Mono NF-14")
-       ('gnu/linux  "Maple Mono NF-18"))
-     t t)))
-
 ;; Fix encoding
 (defun my/revert-buffer-utf8 ()
   "Revert current buffer using UTF-8 (unix) without confirmation."
@@ -64,6 +49,14 @@
 (when (eq system-type 'windows-nt)
   (my/add-to-path "C:/Program Files/Git/usr/bin")
   (my/add-to-path "D:/programm/vips/bin"))
+
+;;; Override map
+(defvar my/override-map (make-sparse-keymap))
+(define-minor-mode my/override-mode
+  "Highest priority keymap."
+  :global t
+  :keymap my/override-map)
+(my/override-mode 1)
 
 ;; Package and use-package
 (require 'package)
@@ -244,6 +237,8 @@ Won't clobber a manually renamed tab."
   :bind
   (("C-v" . scroll-half-page-up)
    ("M-v" . scroll-half-page-down)
+   ("M-&" . with-editor-async-shell-command)
+   ("M-!" . with-editor-shell-command)
    ("C-x _" . maximize-window)
    ("C-c c" . project-compile)
    ("C-c C" . compile)
@@ -254,7 +249,19 @@ Won't clobber a manually renamed tab."
    ("M-<down>" . move-text-down)
    ("M-<up>" . move-text-up)))
 
-;; Tab-bar
+;;; Which key
+(use-package which-key
+  :ensure t
+  :config
+  (which-key-mode 1))
+
+;;; Editor config
+(use-package editorconfig
+  :ensure t
+  :config
+  (editorconfig-mode 1))
+
+;;; Tab-bar
 (use-package tab-bar
   :ensure nil
   :demand t
@@ -275,6 +282,13 @@ Won't clobber a manually renamed tab."
   :bind
   (("C-x t R" . my/tab-rename-to-context)))
 
+;;; Server
+(use-package server
+  :ensure nil
+  :config
+  (unless (server-running-p)
+    (server-start)))
+
 ;; Grep
 (use-package wgrep
   :ensure t)
@@ -290,11 +304,24 @@ Won't clobber a manually renamed tab."
   (rg-enable-default-bindings)
   (rg-enable-menu))
 
-;; Completion UI
+;; Completion
+(use-package corfu
+  :ensure t
+  :custom
+  (corfu-auto nil)
+  (corfu-cycle t)
+  (corfu-preselect 'prompt)
+  (corfu-quit-no-match 'separator)
+  :init (global-corfu-mode)
+  :hook
+  (lsp-bridge-mode . (lambda () (corfu-mode -1))))
+
 (use-package icomplete
   :ensure nil
   :init
   (fido-vertical-mode 1)
+  :bind (:map icomplete-minibuffer-map
+	          ("C-j" . icomplete-fido-exit))
   :custom
   (completion-styles '(basic flex))
   (completions-format 'one-column)
@@ -304,16 +331,6 @@ Won't clobber a manually renamed tab."
   (completions-detailed t)
   (completions-highlight-face 'completions-highlight)
   (completion-auto-help 'visible))
-
-(use-package which-key
-  :ensure t
-  :config
-  (which-key-mode 1))
-
-(use-package editorconfig
-  :ensure t
-  :config
-  (editorconfig-mode 1))
 
 ;; Theme/UI
 (defgroup my/transparency nil
@@ -483,9 +500,6 @@ Won't clobber a manually renamed tab."
             :rev :newest
             :branch "main")
   :demand t
-  :init
-  (add-to-list 'custom-theme-load-path
-               (file-name-directory (locate-library "lambda-themes")))
   :config
   (setq lambda-themes-set-italic-comments t
         lambda-themes-set-italic-keywords t
@@ -495,11 +509,6 @@ Won't clobber a manually renamed tab."
 (use-package mood-line
   :ensure t
   :config
-  (let ((bg (face-background 'header-line nil t)))
-    (set-face-attribute
-     'header-line nil
-     :box `(:line-width 6 :color ,bg)))
-
   (defun my/mode-line-context ()
     "Project name or fallback to directory name (mode line)."
     (propertize (format "[%s]" (my/tab-context-name))
@@ -570,17 +579,29 @@ Won't clobber a manually renamed tab."
          ("C-x C-S-B" . ibuffer)
          ("C-x t 0" . bufferlo-tab-close-kill-buffers)))
 
-;; Completion
-(use-package corfu
-  :ensure t
-  :custom
-  (corfu-auto nil)
-  (corfu-cycle t)
-  (corfu-preselect 'prompt)
-  (corfu-quit-no-match 'separator)
-  :init (global-corfu-mode)
-  :hook
-  (lsp-bridge-mode . (lambda () (corfu-mode -1))))
+;;; Tramp
+(use-package tramp
+  :ensure nil
+  :defer t
+  :init
+  (setq tramp-default-method "ssh")
+  (setq tramp-verbose 1)
+  (setq tramp-use-ssh-controlmaster-options nil)
+  (add-to-list 'tramp-remote-path 'tramp-own-remote-path)
+  :config
+  (setq tramp-default-remote-shell "/bin/bash")
+  (setq tramp-remote-shell "/bin/bash")
+  (setq tramp-remote-shell-login '("-l"))
+  (setq tramp-remote-shell-args '("-c"))
+  (setq tramp-chunksize 2000)
+  (setq tramp-inline-compress-start-size 1000)
+  (setq remote-file-name-inhibit-cache nil)
+  (setq tramp-completion-reread-directory-timeout nil)
+  (setq tramp-auto-save-directory "~/.emacs.d/tramp-autosave/")
+  (setq auth-sources '("~/.authinfo.gpg"))
+  (setq auth-source-cache-expiry nil)
+  (add-to-list 'backup-directory-alist
+               (cons tramp-file-name-regexp "~/.emacs.d/tramp-backups/")))
 
 ;; Desktop (restore session)
 (use-package desktop
@@ -753,7 +774,7 @@ Won't clobber a manually renamed tab."
 
   (add-hook 'eshell-mode-hook
             (lambda ()
-              (keymap-set eshell-mode-map "M-r" #'my/eshell-history-fuzzy)
+              (keymap-set eshell-mode-map "C-r" #'my/eshell-history-fuzzy)
               (keymap-set eshell-mode-map "C-l" #'eshell/clear))))
 
 ;; Consult
@@ -871,36 +892,57 @@ Won't clobber a manually renamed tab."
             :branch "master")
   :bind (("C-'" . avy-goto-word-1)))
 
+(use-package better-jumper
+  :ensure t
+  :init
+  (better-jumper-mode 1)
+  :config
+  (setq better-jumper-context 'window)
+
+  (defun my/better-jumper--set-jump-before (&rest _)
+    (better-jumper-set-jump))
+
+  (dolist (cmd '(xref-find-definitions
+                 xref-find-references
+                 imenu
+                 avy-goto-word-1
+                 beginning-of-buffer
+                 end-of-buffer
+                 switch-to-buffer
+                 pop-to-buffer
+                 other-window
+                 windmove-left windmove-right windmove-up windmove-down
+                 isearch-forward isearch-backward
+                 query-replace query-replace-regexp
+                 next-error previous-error))
+    (advice-add cmd :before #'my/better-jumper--set-jump-before))
+
+  :bind (("M-p" . better-jumper-jump-backward)
+         ("M-n" . better-jumper-jump-forward)))
+
+(use-package harpoon
+  :ensure t
+  :custom
+  (harpoon-project-package 'project)
+  :bind (:map my/override-map
+              ("C-c `" . harpoon-quick-menu-hydra)
+              ("M-0" . harpoon-add-file)
+              ("M-1" . harpoon-go-to-1)
+              ("M-2" . harpoon-go-to-2)
+              ("M-3" . harpoon-go-to-3)
+              ("M-4" . harpoon-go-to-4)
+              ("M-5" . harpoon-go-to-5)
+              ("M-6" . harpoon-go-to-6)
+              ("M-7" . harpoon-go-to-7)
+              ("M-8" . harpoon-go-to-8)
+              ("M-9" . harpoon-go-to-9)))
+
 ;; Treesitter
-(setq treesit-language-source-alist
-      '((bash "https://github.com/tree-sitter/tree-sitter-bash")
-        (cmake "https://github.com/uyha/tree-sitter-cmake")
-        (css "https://github.com/tree-sitter/tree-sitter-css")
-        (elisp "https://github.com/Wilfred/tree-sitter-elisp")
-        (go "https://github.com/tree-sitter/tree-sitter-go")
-        (html "https://github.com/tree-sitter/tree-sitter-html")
-        (javascript "https://github.com/tree-sitter/tree-sitter-javascript" "master" "src")
-        (json "https://github.com/tree-sitter/tree-sitter-json")
-        (make "https://github.com/alemuller/tree-sitter-make")
-        (markdown "https://github.com/ikatyang/tree-sitter-markdown")
-        (python "https://github.com/tree-sitter/tree-sitter-python")
-        (toml "https://github.com/tree-sitter/tree-sitter-toml")
-        (tsx "https://github.com/tree-sitter/tree-sitter-typescript" "master" "tsx/src")
-        (typescript "https://github.com/tree-sitter/tree-sitter-typescript" "master" "typescript/src")
-        (yaml "https://github.com/ikatyang/tree-sitter-yaml")))
-
-(defun my/treesit-install ()
-  (interactive)
-  (mapc #'treesit-install-language-grammar (mapcar #'car treesit-language-source-alist)))
-
-(setq major-mode-remap-alist
-      '((yaml-mode . yaml-ts-mode)
-        (bash-mode . bash-ts-mode)
-        (js2-mode . js-ts-mode)
-        (typescript-mode . typescript-ts-mode)
-        (json-mode . json-ts-mode)
-        (css-mode . css-ts-mode)
-        (python-mode . python-ts-mode)))
+(use-package treesit-auto
+  :ensure t
+  :config
+  (treesit-auto-add-to-auto-mode-alist 'all)
+  (global-treesit-auto-mode))
 
 ;; LSP
 (use-package lsp-bridge
@@ -973,7 +1015,7 @@ Won't clobber a manually renamed tab."
         lsp-bridge-enable-signature-help t
         lsp-bridge-enable-auto-format-code nil)
   :config
-  (add-to-list 'lsp-bridge-multi-lang-server-extension-list '("py" . "pyrefly_ruff"))
+  (add-to-list 'lsp-bridge-multi-lang-server-extension-list '("py" . "ty_ruff"))
   (dolist (ext '("ts" "tsx" "js" "jsx"))
     (add-to-list 'lsp-bridge-multi-lang-server-extension-list (cons ext "tsls_oxlint_oxfmt")))
 
@@ -1084,7 +1126,7 @@ Won't clobber a manually renamed tab."
         (agent-shell-openai-make-codex-config))
   (setq agent-shell-openai-authentication
         (agent-shell-openai-make-authentication :login t))
-  (setq agent-shell-openai-codex-command '("npx" "@zed-industries/codex-acp"))
+  (setq agent-shell-openai-codex-command '("bunx" "@zed-industries/codex-acp"))
   :bind (("C-z a c" . agent-shell)))
 
 ;; Zen mode
@@ -1165,10 +1207,38 @@ Won't clobber a manually renamed tab."
   :ensure t
   :init
   (use-package posframe :ensure t)
+  (setq gt-langs '(auto ru))
 
   :config
-  (setq gt-langs '(auto ru))
   (require 'gt-render-posframe)
+
+  (defvar my/gt-target-langs
+    '(("ru" . ru)
+      ("en" . en)
+      ("de" . de)
+      ("ja" . ja))
+    "Languages for gt target selection.")
+
+  (defun my/gt-set-target-lang ()
+    "Set target language for gt keeping source as auto."
+    (interactive)
+    (let* ((choice (completing-read
+                    "Translate to: "
+                    (mapcar #'car my/gt-target-langs)
+                    nil t))
+           (lang (cdr (assoc choice my/gt-target-langs))))
+      (setq gt-langs (list 'auto lang))
+      (message "gt: auto -> %s" lang)))
+
+  (defun my/gt-translate-to ()
+    "Pick target language and translate."
+    (interactive)
+    (call-interactively #'my/gt-set-target-lang)
+    (gt-translate))
+
+  (with-eval-after-load 'gt
+    (with-eval-after-load 'gt-result
+      (define-key gt-result-mode-map (kbd "y") #'my/gt-copy-translation)))
 
   (setq gt-default-translator
         (gt-translator
@@ -1186,7 +1256,37 @@ Won't clobber a manually renamed tab."
                   :forecolor "#ffffff"
                   :backcolor "#222222"
                   :frame-params (list :border-width 1))))
-  :bind (("C-M-y" . gt-translate)))
+
+  (with-eval-after-load 'gt
+    (defun my/gt-posframe-buffer ()
+      "Return buffer currently used by gt posframe."
+      (when (and (boundp 'gt--render) gt--render)
+        (let ((buf (plist-get gt--render :buffer)))
+          (when (buffer-live-p buf)
+            buf))))
+
+    (defun my/gt-copy-from-posframe ()
+      "Copy translation text from gt posframe."
+      (interactive)
+      (let ((buf (or (my/gt-posframe-buffer)
+                     (car (seq-filter
+                           (lambda (b)
+                             (string-match-p "\\*gt" (buffer-name b)))
+                           (buffer-list))))))
+        (unless (buffer-live-p buf)
+          (user-error "No gt translation buffer found"))
+
+        (with-current-buffer buf
+          (let ((text (string-trim
+                       (buffer-substring-no-properties
+                        (point-min) (point-max)))))
+            (kill-new text)
+            (message "Translation copied")))))
+
+    (global-set-key (kbd "C-M-c") #'my/gt-copy-from-posframe))
+
+  :bind (("C-M-y" . gt-translate)
+         ("C-M-S-y" . my/gt-translate-to)))
 
 ;; EAF
 (use-package eaf
