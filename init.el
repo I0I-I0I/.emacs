@@ -1,7 +1,7 @@
 ;;; init.el --- Emacs init -*- lexical-binding: t; -*-
 
 (setq custom-file (expand-file-name "custom.el" user-emacs-directory))
-(load custom-file 'noerror 'nomessage)
+(load custom-file)
 
 (push '(fullscreen . maximized) default-frame-alist)
 (add-to-list 'default-frame-alist '(undecorated . t))
@@ -167,8 +167,10 @@ Won't clobber a manually renamed tab."
   (add-hook 'before-save-hook #'delete-trailing-whitespace)
   (save-place-mode 1)
   (global-hl-line-mode 1)
+  (repeat-mode 1)
 
   (global-auto-revert-mode 1)
+  (setq auto-revert-interval 1)
   (setq auto-revert-verbose nil)
 
   (fset 'yes-or-no-p 'y-or-n-p)
@@ -246,6 +248,9 @@ Won't clobber a manually renamed tab."
    ("C-c C-l" . (lambda () (interactive) (duplicate-line) (next-line)))
    ("C-c o" . open-file-at-point)
    ("C-c C-o" . browse-url-at-point)
+   ("C-c C-M-o" . browse-url-xdg-open)
+   ("C-M-S-<right>" . org-increase-number-at-point)
+   ("C-M-S-<left>" . org-decrease-number-at-point)
    ("M-<down>" . move-text-down)
    ("M-<up>" . move-text-up)))
 
@@ -587,7 +592,6 @@ Won't clobber a manually renamed tab."
   (setq tramp-default-method "ssh")
   (setq tramp-verbose 1)
   (setq tramp-use-ssh-controlmaster-options nil)
-  (add-to-list 'tramp-remote-path 'tramp-own-remote-path)
   :config
   (setq tramp-default-remote-shell "/bin/bash")
   (setq tramp-remote-shell "/bin/bash")
@@ -714,9 +718,11 @@ Won't clobber a manually renamed tab."
     (interactive)
     (let* ((dir (my/eshell--current-dir))
            (buf (my/eshell--find-by-dir dir)))
-      (cond
-       (buf (switch-to-buffer buf))
-       (t   (my/eshell--new-in-dir dir)))))
+      (if (derived-mode-p 'eshell-mode)
+          (my/eshell--new-in-dir dir)
+        (cond
+         (buf (switch-to-buffer buf))
+         (t   (my/eshell--new-in-dir dir))))))
 
   (require 'project)
 
@@ -731,9 +737,11 @@ Won't clobber a manually renamed tab."
     (interactive)
     (let* ((dir (my/eshell--project-dir))
            (buf (my/eshell--find-by-dir dir)))
-      (if buf
-          (switch-to-buffer buf)
-        (my/eshell--new-in-dir dir))))
+      (if (derived-mode-p 'eshell-mode)
+          (my/eshell--new-in-dir dir)
+        (if buf
+            (switch-to-buffer buf)
+          (my/eshell--new-in-dir dir)))))
 
   :bind (("C-c e" . my/toggle-eshell-here)
          ("C-x p e" . my/toggle-eshell-project))
@@ -859,6 +867,8 @@ Won't clobber a manually renamed tab."
   :custom
   (magit-process-connection-type nil)
   :config
+  (setq magit-display-buffer-function
+        #'magit-display-buffer-same-window-except-diff-v1)
   (when (eq system-type 'windows-nt)
     (setq magit-git-executable "C:/Program Files/Git/bin/git.exe")))
 
@@ -925,7 +935,7 @@ Won't clobber a manually renamed tab."
   :custom
   (harpoon-project-package 'project)
   :bind (:map my/override-map
-              ("C-c `" . harpoon-quick-menu-hydra)
+              ("C-`" . harpoon-quick-menu-hydra)
               ("M-0" . harpoon-add-file)
               ("M-1" . harpoon-go-to-1)
               ("M-2" . harpoon-go-to-2)
@@ -1051,20 +1061,37 @@ Won't clobber a manually renamed tab."
   (add-hook 'compilation-mode-hook #'my/compilation-ensure-pyrefly)
   (add-hook 'compilation-start-hook (lambda (_proc) (my/compilation-ensure-pyrefly))))
 
-(use-package flycheck
-  :ensure t
-  :init (global-flycheck-mode))
+;; (use-package flycheck
+;;   :ensure t
+;;   :init (global-flycheck-mode))
 
 (use-package flyspell
   :ensure nil
   :init
-  (setq ispell-program-name "hunspell"
-        ispell-dictionary "en_US"
-        flyspell-issue-message-flag nil
+  (setq ispell-local-dictionary-alist
+        '(("en_US" "[[:alpha:]]" "[^[:alpha:]]" "['’]" nil ("-d" "en_US") nil utf-8)
+          ("ru_RU" "[[:alpha:]]" "[^[:alpha:]]" "['’]" nil ("-d" "ru_RU") nil utf-8)
+          ("en_US,ru_RU" "[[:alpha:]]" "[^[:alpha:]]" "['’]" nil ("-d" "en_US,ru_RU") nil utf-8)))
+  (let ((aspell (executable-find "aspell"))
+        (hunspell (executable-find "hunspell")))
+    (cond
+     (aspell
+      (setq ispell-program-name aspell
+            ispell-dictionary "en_US"
+            ispell-extra-args '("--sug-mode=ultra")))
+     (hunspell
+      (setq ispell-program-name hunspell
+            ispell-dictionary "en_US,ru_RU"
+            ispell-extra-args nil))
+     (t
+      (setq ispell-program-name "ispell"
+            ispell-dictionary "en_US"))))
+  (setq flyspell-issue-message-flag nil
         flyspell-delay 0.5
         ispell-choices-win-default-height 20)
   :hook
-  ((text-mode . flyspell-mode)
+  ((agent-shell-mode . flyspell-mode)
+   (text-mode . flyspell-mode)
    (prog-mode . flyspell-prog-mode)))
 
 (use-package apheleia
@@ -1114,7 +1141,7 @@ Won't clobber a manually renamed tab."
 ;; AI
 (use-package copilot
   :ensure t
-  :bind (("C-z a a" . copilot-mode)
+  :bind (("C-z A" . copilot-mode)
          :map copilot-completion-map
          ("<tab>" . copilot-accept-completion)
          ("TAB" . copilot-accept-completion)))
@@ -1127,7 +1154,11 @@ Won't clobber a manually renamed tab."
   (setq agent-shell-openai-authentication
         (agent-shell-openai-make-authentication :login t))
   (setq agent-shell-openai-codex-command '("bunx" "@zed-industries/codex-acp"))
-  :bind (("C-z a c" . agent-shell)))
+  :bind (("C-z a" . agent-shell)
+         :map agent-shell-mode-map
+         ("RET" . newline)
+         ("C-c C-c" . shell-maker-submit)
+         ("C-c C-k" . agent-shell-interrupt)))
 
 ;; Zen mode
 (use-package sublimity
