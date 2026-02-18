@@ -198,6 +198,11 @@ Won't clobber a manually renamed tab."
     (interactive)
     (scroll-up (/ (window-body-height) 2)))
 
+  (define-prefix-command 'my/c-z-map)
+  (defvar my/c-z-z-map (make-sparse-keymap))
+  (define-key global-map (kbd "C-z") my/c-z-map)
+  (define-key my/c-z-map (kbd "z") my/c-z-z-map)
+
   ;; Move text
   (defun move-text-internal (arg)
     (cond
@@ -222,20 +227,6 @@ Won't clobber a manually renamed tab."
   (defun move-text-down (arg) (interactive "*p") (move-text-internal arg))
   (defun move-text-up   (arg) (interactive "*p") (move-text-internal (- arg)))
 
-  ;; Files
-  (defun open-file-at-point ()
-    (interactive)
-    (require 'ffap)
-    (let ((file (or (ffap-file-at-point) (thing-at-point 'filename t))))
-      (if file
-          (find-file (expand-file-name file))
-        (user-error "No filename at point"))))
-
-  (define-prefix-command 'my/c-z-map)
-  (defvar my/c-z-z-map (make-sparse-keymap))
-  (define-key global-map (kbd "C-z") my/c-z-map)
-  (define-key my/c-z-map (kbd "z") my/c-z-z-map)
-
   :bind
   (("C-v" . scroll-half-page-up)
    ("M-v" . scroll-half-page-down)
@@ -245,14 +236,50 @@ Won't clobber a manually renamed tab."
    ("C-c c" . project-compile)
    ("C-c C" . compile)
    ("C-c C-b" . grep)
-   ("C-c C-l" . (lambda () (interactive) (duplicate-line) (next-line)))
-   ("C-c o" . open-file-at-point)
    ("C-c C-o" . browse-url-at-point)
+   ("C-c o" . find-file-at-point)
    ("C-c C-M-o" . browse-url-xdg-open)
-   ("C-M-S-<right>" . org-increase-number-at-point)
-   ("C-M-S-<left>" . org-decrease-number-at-point)
    ("M-<down>" . move-text-down)
-   ("M-<up>" . move-text-up)))
+   ("M-<up>" . move-text-up)
+   ("M-S-<right>" . org-increase-number-at-point)
+   ("M-S-<left>" . org-decrease-number-at-point)))
+
+(use-package crux
+  :ensure t
+  :config
+  (crux-with-region-or-buffer indent-region)
+  (crux-with-region-or-buffer untabify)
+  (crux-with-region-or-line comment-or-uncomment-region)
+  (crux-with-region-or-sexp-or-line kill-region)
+  (crux-with-region-or-point-to-eol kill-ring-save)
+  :bind (("C-a"     . crux-move-beginning-of-line)
+         ;; ("C-c o"   . crux-open-with)
+         ("C-c D"   . crux-delete-file-and-buffer)
+         ("C-c r"   . crux-rename-file-and-buffer)
+         ("C-c k"   . crux-kill-other-buffers)
+         ("C-c d"   . crux-duplicate-current-line-or-region)
+         ("C-c M-d" . crux-duplicate-and-comment-current-line-or-region)
+         ("C-c n"   . crux-cleanup-buffer-or-region)
+         ("C-c f"   . crux-recentf-find-file)
+         ("C-c F"   . crux-recentf-find-directory)
+         ("C-c u"   . crux-view-url)
+         ("C-c e"   . crux-eval-and-replace)
+         ("C-c s"   . crux-swap-windows)
+         ("C-c w"   . crux-copy-file-preserve-attributes)
+         ("C-c I"   . crux-find-user-init-file)
+         ("C-x 4 t" . crux-transpose-windows)
+         ("C-c TAB" . crux-indent-defun)
+         ("C-c b"   . crux-switch-to-previous-buffer)
+         ("C-^"     . crux-top-join-line)
+         ("C-c C-k" . crux-kill-and-join-forward)
+         ("C-S-k"   . crux-kill-whole-line)
+         ("M-o"     . crux-other-window-or-switch-buffer)
+         ("C-g"     . crux-keyboard-quit-dwim)
+         ("C-c M-c" . crux-kill-buffer-truename)
+         ("C-<return>"   . crux-smart-open-line)
+         ("C-S-<return>" . crux-smart-open-line-above)
+         :map dired-mode-map
+         ("z" . crux-open-with)))
 
 ;;; Which key
 (use-package which-key
@@ -291,8 +318,7 @@ Won't clobber a manually renamed tab."
 (use-package server
   :ensure nil
   :config
-  (unless (server-running-p)
-    (server-start)))
+  (unless (server-running-p) (server-start)))
 
 ;; Grep
 (use-package wgrep
@@ -314,19 +340,35 @@ Won't clobber a manually renamed tab."
   :ensure t
   :custom
   (corfu-auto t)
+  (corfu-auto-delay 0.1)
+  (corfu-auto-prefix 1)
   (corfu-cycle t)
   (corfu-preselect 'prompt)
   (corfu-quit-no-match 'separator)
+  :config
+  (setq tab-always-indent 'complete)
+  (setq completion-cycle-threshold 3)
+  (corfu-history-mode 1)
+  (corfu-popupinfo-mode 1)
   :init (global-corfu-mode)
   :hook
   (eshell-mode . (lambda () (setq-local corfu-auto nil))))
+
+(use-package cape
+  :ensure t
+  :init
+  (add-to-list 'completion-at-point-functions #'cape-file)
+  (add-to-list 'completion-at-point-functions #'cape-dabbrev)
+  (add-to-list 'completion-at-point-functions #'cape-keyword)
+  (when (fboundp 'cape-symbol)
+    (add-to-list 'completion-at-point-functions #'cape-symbol)))
 
 (use-package icomplete
   :ensure nil
   :init
   (fido-vertical-mode 1)
   :bind (:map icomplete-minibuffer-map
-	          ("C-j" . icomplete-fido-exit))
+              ("C-j" . icomplete-fido-exit))
   :custom
   (completion-styles '(basic flex))
   (completions-format 'one-column)
@@ -511,20 +553,27 @@ Won't clobber a manually renamed tab."
         lambda-themes-set-variable-pitch t)
   (load-theme 'lambda-dark t))
 
-(use-package mood-line
+(use-package doom-modeline
   :ensure t
-  :config
-  (defun my/mode-line-context ()
-    "Project name or fallback to directory name (mode line)."
-    (propertize (format "[%s]" (my/tab-context-name))
-                'face 'mode-line-emphasis))
-
-  (mood-line-mode)
+  :init
+  (doom-modeline-mode 1)
+  (setq-default header-line-format (doom-modeline-set-main-modeline))
   (setq-default mode-line-format nil)
-  (setq-default header-line-format
-                (list
-                 '(:eval (my/mode-line-context))
-                 '(:eval (mood-line--process-format mood-line-format)))))
+
+  (setq doom-modeline-bar-width 0)
+  (display-battery-mode 1)
+
+  (dolist (face '(mode-line mode-line-inactive header-line))
+    (set-face-attribute face nil :box nil))
+
+  :custom
+  (doom-modeline-icon nil)
+  (doom-modeline-check nil)
+  (doom-modeline-buffer-file-name-style 'relative-to-project)
+  (doom-modeline-buffer-encoding nil)
+  (doom-modeline-percent-position '(-4 "%p"))
+  (doom-modeline-total-line-number t)
+  (doom-modeline-position-line-format '("%l")))
 
 ;; IBuffer
 (use-package ibuffer
@@ -574,9 +623,18 @@ Won't clobber a manually renamed tab."
 (use-package bufferlo
   :ensure t
   :after ibuffer
-  :init
-  (bufferlo-mode)
+  :demand t
   :config
+  (unless (fboundp 'bufferlo--ibuffer-do-bufferlo-remove-prompt)
+    (defun bufferlo--ibuffer-do-bufferlo-remove-prompt (op)
+      "`ibuffer' prompt helper for OP."
+      (let ((bookmark-name (when (fboundp 'bufferlo--current-bookmark-name)
+                             (bufferlo--current-bookmark-name))))
+        (format "%s from %slocals:" op
+                (if bookmark-name
+                    (format-message "bufferlo bookmark `%s' " bookmark-name)
+                  "")))))
+  (bufferlo-mode 1)
   :bind (("C-x b" . bufferlo-switch-to-buffer)
          ("C-x B" . bufferlo-find-buffer-switch)
          ("C-x C-M-b" . bufferlo-ibuffer-orphans)
@@ -636,6 +694,7 @@ Won't clobber a manually renamed tab."
                 "\\|\\`\\*Warnings\\*\\'"
                 "\\|\\`\\*Async-native-compile-log\\*\\'"
                 "\\|\\`\\*tramp/.*\\*\\'"))
+  (add-to-list 'desktop-modes-not-to-save 'ibuffer-mode)
   :config
   (with-eval-after-load 'desktop (require 'org))
   (make-directory desktop-dirname t)
@@ -843,9 +902,7 @@ Won't clobber a manually renamed tab."
          ("M-r" . consult-history))
   :init
   (advice-add #'register-preview :override #'consult-register-window)
-  (setq register-preview-delay 0.5)
-  (setq xref-show-xrefs-function #'consult-xref
-        xref-show-definitions-function #'consult-xref))
+  (setq register-preview-delay 0.5))
 
 ;; Undo
 (use-package undo-tree
@@ -863,20 +920,38 @@ Won't clobber a manually renamed tab."
 (use-package magit
   :ensure t
   :commands (magit-status magit-dispatch)
-  :bind (("C-z g g" . magit-status))
+  :bind (("C-x v d" . magit-status)
+         ("C-x v v" . magit-commit-create)
+         ("C-x v l" . magit-log-buffer-file)
+         ("C-x v L" . magit-log)
+         ("C-x v b" . magit-blame-addition)
+         ("C-x v u" . magit-revert)
+         ("C-x v P" . magit-push-current)
+         ("C-x v p" . magit-pull-branch)
+         ("C-x v !" . magit-dispatch))
   :custom
   (magit-process-connection-type nil)
+  (vc-handled-backends '(Git))
   :config
   (setq magit-display-buffer-function
         #'magit-display-buffer-same-window-except-diff-v1)
   (when (eq system-type 'windows-nt)
     (setq magit-git-executable "C:/Program Files/Git/bin/git.exe")))
 
+(use-package diff-hl
+  :ensure t
+  :custom
+  (diff-hl-disable-on-remote t)
+  :init
+  (add-hook 'magit-post-refresh-hook 'diff-hl-magit-post-refresh)
+  (global-diff-hl-mode)
+  (global-diff-hl-show-hunk-mouse-mode))
+
 (use-package git-timemachine
   :vc (:url "https://codeberg.org/pidu/git-timemachine"
             :rev :newest
             :branch "master")
-  :bind (("C-z g t" . git-timemachine)))
+  :bind (("C-x v t" . git-timemachine)))
 
 ;; Selection
 (use-package expand-region
@@ -888,12 +963,13 @@ Won't clobber a manually renamed tab."
   :vc (:url "https://github.com/magnars/multiple-cursors.el"
             :rev :newest
             :branch "master")
-  :bind (("C->" . mc/mark-next-like-this)
-         ("C-<" . mc/mark-previous-like-this)
-         ("C-c C-<" . mc/mark-all-like-this)
-         ("C-S-c C-S-c" . mc/edit-lines)
-         ("C-M->" . mc/skip-to-next-like-this)
-         ("C-M-<" . mc/skip-to-previous-like-this)))
+  :demand t
+  :bind (("M-n" . mc/mark-next-like-this)
+         ("M-p" . mc/mark-previous-like-this)
+         ("M-S-n" . mc/skip-to-next-like-this)
+         ("M-S-p" . mc/skip-to-previous-like-this)
+         ("C-c M-n" . mc/mark-all-like-this)
+         ("C-c C-a" . mc/edit-lines)))
 
 ;; Jump
 (use-package avy
@@ -918,17 +994,18 @@ Won't clobber a manually renamed tab."
                  avy-goto-word-1
                  beginning-of-buffer
                  end-of-buffer
+                 backward-paragraph
+                 forward-paragraph
                  switch-to-buffer
                  pop-to-buffer
                  other-window
-                 windmove-left windmove-right windmove-up windmove-down
                  isearch-forward isearch-backward
                  query-replace query-replace-regexp
-                 next-error previous-error))
+                 next-error previous-error occur
+                 consult-imenu))
     (advice-add cmd :before #'my/better-jumper--set-jump-before))
-
-  :bind (("M-p" . better-jumper-jump-backward)
-         ("M-n" . better-jumper-jump-forward)))
+  :bind (("C-<" . better-jumper-jump-backward)
+         ("C->" . better-jumper-jump-forward)))
 
 (use-package harpoon
   :ensure t
@@ -959,22 +1036,62 @@ Won't clobber a manually renamed tab."
   :ensure t
   :commands (lsp lsp-deferred)
   :hook
-  (((python-mode
-     python-ts-mode
-     web-mode
-     js-mode
-     js-ts-mode
-     typescript-mode
-     typescript-ts-mode
-     tsx-ts-mode
-     css-mode
-     css-ts-mode
-     json-mode
-     json-ts-mode
-     yaml-mode
-     yaml-ts-mode) . lsp-deferred))
+  (((web-mode
+     js-mode js-ts-mode js-jsx-mode
+     typescript-mode typescript-ts-mode tsx-ts-mode
+     css-mode css-ts-mode
+     json-mode json-ts-mode
+     yaml-mode yaml-ts-mode
+     python-mode python-ts-mode) . lsp-deferred))
   :init
+  (use-package flycheck
+    :ensure t
+    :init (global-flycheck-mode)
+    :config
+    (setq flycheck-display-errors-delay 0.25)
+    (setq flycheck-indication-mode 'right-fringe)
+    (setq flycheck-highlighting-mode 'symbols))
+
+  (use-package apheleia
+    :ensure t
+    :init
+    (apheleia-global-mode +1)
+
+    :config
+    (setf (alist-get 'ruff-format apheleia-formatters)
+          '("ruff" "format" "-"))
+    (setf (alist-get 'oxfmt apheleia-formatters)
+          '("oxfmt" "--stdin"))
+
+    ;; Optional: if you want Ruff to also apply safe fixes on save,
+    ;; you can run "ruff check --fix" BEFORE formatting using a "sequential" formatter.
+    ;; Uncomment if desired.
+    ;;
+    ;; (setf (alist-get 'ruff-fix+format apheleia-formatters)
+    ;;       '((:formatter "ruff" "check" "--fix" "--exit-zero" "--stdin-filename" filepath "-")
+    ;;         (:formatter "ruff" "format" "-")))
+
+    (setf (alist-get 'python-mode apheleia-mode-alist) 'ruff-format)
+    (setf (alist-get 'python-ts-mode apheleia-mode-alist) 'ruff-format)
+
+    (dolist (mode '(js-mode js-ts-mode
+                            typescript-mode typescript-ts-mode
+                            tsx-ts-mode
+                            web-mode))
+      (setf (alist-get mode apheleia-mode-alist) 'oxfmt))
+
+    (dolist (mode '(json-mode json-ts-mode))
+      (setf (alist-get mode apheleia-mode-alist) 'oxfmt))
+
+    :bind (("C-c f" . apheleia-format-buffer)))
+
+
+  (setq xref-show-xrefs-function #'xref-show-definitions-buffer)
+  (setq xref-show-definitions-function #'xref-show-definitions-buffer)
+
+  :config
   (setq lsp-completion-provider :none
+        lsp-diagnostics-provider :flycheck
         lsp-eldoc-enable-hover nil
         lsp-signature-auto-activate t
         lsp-enable-on-type-formatting nil
@@ -983,12 +1100,8 @@ Won't clobber a manually renamed tab."
         lsp-headerline-breadcrumb-enable nil
         lsp-idle-delay 0.3
         lsp-log-io nil
-        lsp-format-buffer-on-save t)
+        lsp-format-buffer-on-save nil)
 
-  (setq xref-show-xrefs-function #'xref-show-definitions-buffer)
-  (setq xref-show-definitions-function #'xref-show-definitions-buffer)
-
-  :config
   (dolist (client '(basedpyright pylsp pyright ruff))
     (add-to-list 'lsp-disabled-clients client))
 
@@ -1030,7 +1143,9 @@ Won't clobber a manually renamed tab."
         ("C-c l s" . lsp-workspace-symbol)
         ("C-c l r" . lsp-rename)
         ("C-c l a" . lsp-execute-code-action)
-        ("C-c l d" . flymake-show-buffer-diagnostics)
+        ("C-c l d" . flycheck-list-errors)
+        ("C-c C-n" . flycheck-next-error)
+        ("C-c C-p" . flycheck-previous-error)
         ("C-c l D" . lsp-diagnostics)
         ("C-c p" . previous-error)
         ("C-c n" . next-error)
@@ -1050,10 +1165,6 @@ Won't clobber a manually renamed tab."
     (add-to-list 'compilation-error-regexp-alist 'pyrefly))
   (add-hook 'compilation-mode-hook #'my/compilation-ensure-pyrefly)
   (add-hook 'compilation-start-hook (lambda (_proc) (my/compilation-ensure-pyrefly))))
-
-;; (use-package flycheck
-;;   :ensure t
-;;   :init (global-flycheck-mode))
 
 (use-package flyspell
   :ensure nil
@@ -1083,34 +1194,6 @@ Won't clobber a manually renamed tab."
   ((agent-shell-mode . flyspell-mode)
    (text-mode . flyspell-mode)
    (prog-mode . flyspell-prog-mode)))
-
-(use-package apheleia
-  :ensure t
-  :init
-  (apheleia-global-mode +1)
-
-  :config
-  (setf (alist-get 'oxfmt apheleia-formatters)
-        '("oxfmt" "--stdin"))
-
-  ;; Optional: if you want Ruff to also apply safe fixes on save,
-  ;; you can run "ruff check --fix" BEFORE formatting using a "sequential" formatter.
-  ;; Uncomment if desired.
-  ;;
-  ;; (setf (alist-get 'ruff-fix+format apheleia-formatters)
-  ;;       '((:formatter "ruff" "check" "--fix" "--exit-zero" "--stdin-filename" filepath "-")
-  ;;         (:formatter "ruff" "format" "-")))
-
-  (dolist (mode '(js-mode js-ts-mode
-                          typescript-mode typescript-ts-mode
-                          tsx-ts-mode
-                          web-mode))
-    (setf (alist-get mode apheleia-mode-alist) 'oxfmt))
-
-  (dolist (mode '(json-mode json-ts-mode))
-    (setf (alist-get mode apheleia-mode-alist) 'oxfmt))
-
-  :bind (("C-c f" . apheleia-format-buffer)))
 
 ;; DAP
 (use-package dap-mode
@@ -1156,10 +1239,40 @@ Won't clobber a manually renamed tab."
 ;; Dirvish
 (use-package dirvish
   :ensure t
-  :init (use-package dired
-          :ensure nil
-          :hook (dired-mode . dired-omit-mode)
-          :custom (dired-omit-files (rx string-start (or "." "..") string-end)))
+  :init
+  (use-package dired
+    :ensure nil
+    :hook (dired-mode . dired-omit-mode)
+    :custom (dired-omit-files (rx string-start (or "." "..") string-end)))
+
+  (use-package ready-player
+    :ensure t
+    :custom
+    (ready-player-autoplay nil)
+    (ready-player-thumbnail-max-pixel-height 600)
+    :config (ready-player-mode))
+
+  (use-package dired-preview
+    :ensure t
+    :custom
+    (dired-preview-delay 0.2)
+    (dired-preview-max-size (expt 2 20))
+    (dired-preview-ignored-extensions-regexp nil)
+    :config
+    (defun my/dired-preview-display-action-alist ()
+      `((display-buffer-in-side-window)
+        (side . right)
+        (window-width . 0.65)))
+    (setq dired-preview-display-action-alist #'my/dired-preview-display-action-alist)
+    (defun my/dired-preview-recenter (file)
+      (when-let* ((buf (dired-preview--get-preview-buffer file))
+                  (win (get-buffer-window buf)))
+        (with-selected-window win
+          (goto-char (point-min))
+          (recenter 0))))
+    (advice-add 'dired-preview-display-file :after #'my/dired-preview-recenter)
+    :bind (:map dired-mode-map
+                ("C-c p" . dired-preview-mode)))
 
   (dirvish-override-dired-mode)
   :hook (dired-mode . (lambda () (display-line-numbers-mode -1)))
@@ -1173,34 +1286,6 @@ Won't clobber a manually renamed tab."
               ("l" . dired-find-file)
               ("<backtab>" . dirvish-layout-toggle)))
 
-(use-package ready-player
-  :ensure t
-  :custom
-  (ready-player-autoplay nil)
-  (ready-player-thumbnail-max-pixel-height 600)
-  :config (ready-player-mode))
-
-(use-package dired-preview
-  :ensure t
-  :custom
-  (dired-preview-delay 0.2)
-  (dired-preview-max-size (expt 2 20))
-  (dired-preview-ignored-extensions-regexp nil)
-  :config
-  (defun my/dired-preview-display-action-alist ()
-    `((display-buffer-in-side-window)
-      (side . right)
-      (window-width . 0.65)))
-  (setq dired-preview-display-action-alist #'my/dired-preview-display-action-alist)
-  (defun my/dired-preview-recenter (file)
-    (when-let* ((buf (dired-preview--get-preview-buffer file))
-                (win (get-buffer-window buf)))
-      (with-selected-window win
-        (goto-char (point-min))
-        (recenter 0))))
-  (advice-add 'dired-preview-display-file :after #'my/dired-preview-recenter)
-  :bind (:map dired-mode-map
-              ("C-c p" . dired-preview-mode)))
 
 ;; Org
 (use-package org
@@ -1209,14 +1294,15 @@ Won't clobber a manually renamed tab."
   :hook ((org-mode . visual-line-mode)
          (org-mode . org-indent-mode)
          (org-mode . (lambda () (display-line-numbers-mode -1))))
+  :init
+  (use-package valign
+    :ensure t
+    :hook ((org-mode-hook . valign-mode))
+    :custom (valign-fancy-bar t))
+
   :config
   (setq org-startup-indented t
         org-hide-emphasis-markers t))
-
-(use-package valign
-  :ensure t
-  :hook ((org-mode-hook . valign-mode))
-  :custom (valign-fancy-bar t))
 
 ;; Translate
 (use-package gt
@@ -1310,6 +1396,7 @@ Won't clobber a manually renamed tab."
             :rev :newest
             :branch "master")
   :commands (eaf-open-browser eaf-open eaf-search-it eaf-open-url-at-point eaf-open-browser-with-history eaf-open-pdf-from-history)
+  :demand t
   :init (use-package htmlize :ensure t)
   :custom
   (eaf-browser-translate-language "en")
@@ -1341,145 +1428,3 @@ Won't clobber a manually renamed tab."
          ("h" . eaf-open-browser-with-history)
          ("s" . eaf-search-it)
          ("p" . eaf-open-pdf-from-history)))
-
-;;; --- Smart open: EAF for PDFs, system apps for audio/video/images/etc ---
-(require 'seq)
-(require 'subr-x)
-(require 'mailcap)
-
-(defgroup my/open nil "My file opening rules." :group 'convenience)
-
-(defcustom my/open-with-eaf-exts '("pdf" "epub")
-  "File extensions to open via EAF."
-  :type '(repeat string)
-  :group 'my/open)
-
-(defcustom my/open-with-system-exts
-  '("png" "jpg" "jpeg" "gif" "webp" "svg"
-    "mp4" "mkv" "mov" "webm" "avi" "m4v"
-    "mp3" "flac" "wav" "ogg" "m4a" "opus"
-    "zip" "7z" "rar" "tar" "gz" "bz2" "xz")
-  "File extensions to open via system default apps (fallback)."
-  :type '(repeat string)
-  :group 'my/open)
-
-(defcustom my/open-media-players
-  '(("mpv.desktop" . "mpv")
-    ("vlc.desktop" . "vlc")
-    ("org.gnome.Celluloid.desktop" . "celluloid"))
-  "Preferred media players when xdg-mime default matches a desktop entry."
-  :type '(alist :key-type string :value-type string)
-  :group 'my/open)
-
-(defcustom my/dirvish-video-thumb-size 640
-  "Max width (px) for Dirvish video thumbnails."
-  :type 'integer
-  :group 'dirvish)
-
-(defun my/file-ext (path)
-  (downcase (or (file-name-extension path) "")))
-
-(defun my/local-file-p (path)
-  (and path
-       (not (file-remote-p path))
-       (file-exists-p path)))
-
-(defun my/mime-type (path)
-  (or (mailcap-file-name-to-mime-type path) ""))
-
-(defun my/xdg-mime-default (mime)
-  (when (and (stringp mime) (not (string-empty-p mime))
-             (executable-find "xdg-mime"))
-    (with-temp-buffer
-      (when (eq 0 (call-process "xdg-mime" nil t nil "query" "default" mime))
-        (string-trim (buffer-string))))))
-
-(defun my/media-file-p (path)
-  (and (my/local-file-p path)
-       (let ((mt (my/mime-type path)))
-         (or (string-prefix-p "video/" mt)
-             (string-prefix-p "audio/" mt)))))
-
-(defun my/open-media-direct (path)
-  (let* ((mime (my/mime-type path))
-         (desk (my/xdg-mime-default mime))
-         (cmd  (and desk (cdr (assoc desk my/open-media-players)))))
-    (when (and cmd (executable-find cmd))
-      (make-process :name "my-open-media" :command (list cmd path) :noquery t)
-      t)))
-
-(defun my/open-in-system-app (path)
-  (unless (my/local-file-p path)
-    (user-error "Not a local existing file: %s" path))
-  (pcase system-type
-    ('darwin
-     (make-process :name "my-open" :command (list "open" path) :noquery t))
-    ('windows-nt
-     (w32-shell-execute "open" (replace-regexp-in-string "/" "\\" path t t)))
-    (_
-     (cond
-      ((and (my/media-file-p path)
-            (my/open-media-direct path))
-       t)
-      ((executable-find "gio")
-       (make-process :name "my-open" :command (list "gio" "open" path) :noquery t))
-      ((executable-find "xdg-open")
-       (make-process :name "my-open" :command (list "xdg-open" path) :noquery t))
-      (t
-       (user-error "No opener found (need xdg-open or gio)"))))))
-
-(defun my/open-file-smart (path)
-  (let* ((path (expand-file-name path))
-         (ext  (my/file-ext path)))
-    (cond
-     ((member ext my/open-with-eaf-exts)
-      (require 'eaf)
-      (require 'eaf-pdf-viewer nil t)
-      (require 'eaf-browser nil t)
-      (eaf-open path)
-      t)
-
-     ((my/media-file-p path)
-      (my/open-in-system-app path)
-      t)
-
-     ((and (my/local-file-p path)
-           (member ext my/open-with-system-exts))
-      (my/open-in-system-app path)
-      t)
-
-     (t nil))))
-
-(defun my/find-file-around (orig file &rest args)
-  "Route some file types to EAF or system apps."
-  (let ((path (and file (expand-file-name file))))
-    (if (and path (my/open-file-smart path))
-        nil
-      (apply orig file args))))
-
-(advice-add 'find-file :around #'my/find-file-around)
-
-(with-eval-after-load 'dired
-  (defun my/dired-find-file-around (orig &rest args)
-    (let ((path (dired-get-file-for-visit)))
-      (if (my/open-file-smart path)
-          nil
-        (apply orig args))))
-  (advice-add 'dired-find-file :around #'my/dired-find-file-around)
-
-  (defun my/dired-do-find-marked-files-around (orig &rest args)
-    (let ((files (dired-get-marked-files)))
-      (if (and files (seq-every-p #'my/open-file-smart files))
-          nil
-        (apply orig args))))
-  (advice-add 'dired-do-find-marked-files :around #'my/dired-do-find-marked-files-around))
-
-(defun my/open-current-file-externally ()
-  "Open current file (or Dired file at point) in system default app."
-  (interactive)
-  (let ((path (or buffer-file-name
-                  (and (derived-mode-p 'dired-mode) (dired-get-file-for-visit)))))
-    (unless path (user-error "No file here"))
-    (my/open-in-system-app (expand-file-name path))))
-
-(global-set-key (kbd "C-c x") #'my/open-current-file-externally)
