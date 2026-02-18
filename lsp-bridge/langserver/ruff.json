@@ -1,7 +1,0 @@
-{
-  "name": "ruff",
-  "languageId": "python",
-  "command": ["ruff", "server"],
-  "settings": {},
-  "support-single-file": false
-}

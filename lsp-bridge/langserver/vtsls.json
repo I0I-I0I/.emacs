@@ -1,7 +1,0 @@
-{
-  "name": "vtsls",
-  "languageId": "",
-  "command": ["vtsls", "--stdio"],
-  "settings": {},
-  "support-single-file": false
-}

@@ -1,7 +1,0 @@
-{
-  "default": "pyrefly",
-  "diagnostics": ["pyrefly", "ruff"],
-  "code_action": ["pyrefly", "ruff"],
-  "execute_command": ["pyrefly", "ruff"],
-  "formatting": "ruff"
-}

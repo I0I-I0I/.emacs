@@ -313,13 +313,13 @@ Won't clobber a manually renamed tab."
 (use-package corfu
   :ensure t
   :custom
-  (corfu-auto nil)
+  (corfu-auto t)
   (corfu-cycle t)
   (corfu-preselect 'prompt)
   (corfu-quit-no-match 'separator)
   :init (global-corfu-mode)
   :hook
-  (lsp-bridge-mode . (lambda () (corfu-mode -1))))
+  (eshell-mode . (lambda () (setq-local corfu-auto nil))))
 
 (use-package icomplete
   :ensure nil
@@ -955,96 +955,86 @@ Won't clobber a manually renamed tab."
   (global-treesit-auto-mode))
 
 ;; LSP
-(use-package lsp-bridge
-  :vc (:url "https://github.com/manateelazycat/lsp-bridge"
-            :rev :newest
-            :branch "master")
-  :demand t
-  :hook ((python-mode
-          python-ts-mode
-          web-mode
-          js-mode
-          js-ts-mode
-          typescript-mode
-          typescript-ts-mode
-          tsx-ts-mode
-          css-mode
-          css-ts-mode
-          json-mode
-          json-ts-mode
-          yaml-mode
-          yaml-ts-mode
-          emacs-lisp-mode) . lsp-bridge-mode)
+(use-package lsp-mode
+  :ensure t
+  :commands (lsp lsp-deferred)
+  :hook
+  (((python-mode
+     python-ts-mode
+     web-mode
+     js-mode
+     js-ts-mode
+     typescript-mode
+     typescript-ts-mode
+     tsx-ts-mode
+     css-mode
+     css-ts-mode
+     json-mode
+     json-ts-mode
+     yaml-mode
+     yaml-ts-mode) . lsp-deferred))
   :init
-  (use-package markdown-mode
-    :ensure t)
+  (setq lsp-completion-provider :none
+        lsp-eldoc-enable-hover nil
+        lsp-signature-auto-activate t
+        lsp-enable-on-type-formatting nil
+        lsp-javascript-format-enable nil
+        lsp-typescript-format-enable nil
+        lsp-headerline-breadcrumb-enable nil
+        lsp-idle-delay 0.3
+        lsp-log-io nil
+        lsp-format-buffer-on-save t)
 
-  (use-package web-mode
-    :ensure t)
+  (setq xref-show-xrefs-function #'xref-show-definitions-buffer)
+  (setq xref-show-definitions-function #'xref-show-definitions-buffer)
 
-  (use-package yasnippet
-    :vc (:url "https://github.com/joaotavora/yasnippet"
-              :rev :newest
-              :branch "master")
-    :ensure t
-    :config
-    (yas-global-mode 1))
-
-  (use-package cape
-    :ensure t
-    :init
-    (add-to-list 'completion-at-point-functions #'cape-file)
-    (add-to-list 'completion-at-point-functions #'cape-dabbrev)
-    (add-to-list 'completion-at-point-functions #'cape-keyword)
-    (add-hook 'completion-at-point-functions #'cape-elisp-block))
-
-  (setq acm-enable-quick-access nil
-        acm-enable-icon nil
-        acm-enable-capf t
-        acm-enable-path t
-        acm-enable-search-file-words t
-        acm-enable-yas t
-        acm-enable-doc t
-        acm-enable-doc-markdown-render t
-        acm-enable-lsp-workspace-symbol t
-        acm-candidate-match-function 'regexp-quote
-        acm-backend-lsp-enable-auto-import t)
-
-  (dolist (dir '("~/.bun/bin" "~/.local/bin"))
-    (let* ((path (expand-file-name dir))
-           (path-list (split-string (or (getenv "PATH") "") path-separator t)))
-      (when (file-directory-p path)
-        (unless (member path exec-path)
-          (setq exec-path (cons path exec-path)))
-        (unless (member path path-list)
-          (setenv "PATH" (concat path path-separator (getenv "PATH")))))))
-  (setq lsp-bridge-user-langserver-dir (expand-file-name "~/.emacs.d/lsp-bridge/langserver/"))
-  (setq lsp-bridge-user-multiserver-dir (expand-file-name "~/.emacs.d/lsp-bridge/multiserver/"))
-
-  (setq lsp-bridge-enable-hover-diagnostic nil
-        lsp-bridge-enable-signature-help t
-        lsp-bridge-enable-auto-format-code nil)
   :config
-  (add-to-list 'lsp-bridge-multi-lang-server-extension-list '("py" . "ty_ruff"))
-  (dolist (ext '("ts" "tsx" "js" "jsx"))
-    (add-to-list 'lsp-bridge-multi-lang-server-extension-list (cons ext "tsls_oxlint_oxfmt")))
+  (dolist (client '(basedpyright pylsp pyright ruff))
+    (add-to-list 'lsp-disabled-clients client))
 
-  (defun my/lsp-bridge-xref-backend () 'lsp-bridge)
-  (add-hook 'lsp-bridge-mode-hook (lambda () (add-hook 'xref-backend-functions #'my/lsp-bridge-xref-backend nil t)))
-  :bind (:map lsp-bridge-mode-map
-              ("M-."   . lsp-bridge-find-def)
-              ("C-c M-." . lsp-bridge-find-type-def)
-              ("M-,"   . lsp-bridge-find-def-return)
-              ("M-?"   . lsp-bridge-find-references)
-              ("C-h ." . lsp-bridge-popup-documentation)
-              ("C-c l s" . lsp-bridge-workspace-list-symbols)
-              ("C-c l r" . lsp-bridge-rename)
-              ("C-c l a" . lsp-bridge-code-action)
-              ("C-c l d" . lsp-bridge-diagnostic-list)
-              ("C-c l D" . lsp-bridge-workspace-diagnostic-list)
-              ("C-c C-n" . lsp-bridge-diagnostic-jump-next)
-              ("C-c C-p" . lsp-bridge-diagnostic-jump-prev)
-              ("C-c l f" . lsp-bridge-format-buffer)))
+  (lsp-register-client
+   (make-lsp-client
+    :new-connection (lsp-stdio-connection '("ty" "server"))
+    :major-modes '(python-ts-mode python-mode)
+    :server-id 'ty-ls
+    :priority 1))
+  (lsp-register-client
+   (make-lsp-client
+    :new-connection (lsp-stdio-connection '("ruff" "server"))
+    :major-modes '(python-ts-mode python-mode)
+    :server-id 'ruff-ls
+    :priority 2
+    :add-on? t))
+
+  (lsp-register-client
+   (make-lsp-client
+    :new-connection (lsp-stdio-connection '("oxlint" "--lsp"))
+    :activation-fn (lambda (_filename major-mode)
+                     (memq major-mode '(js-mode js-ts-mode typescript-mode typescript-ts-mode tsx-ts-mode)))
+    :server-id 'oxlint-ls
+    :add-on? t))
+  (lsp-register-client
+   (make-lsp-client
+    :new-connection (lsp-stdio-connection '("oxfmt" "--lsp"))
+    :activation-fn (lambda (_filename major-mode)
+                     (memq major-mode '(js-mode js-ts-mode typescript-mode typescript-ts-mode tsx-ts-mode)))
+    :server-id 'oxfmt-ls
+    :add-on? t))
+  :bind
+  (:map lsp-mode-map
+        ("M-." . xref-find-definitions)
+        ("C-c M-." . lsp-find-type-definition)
+        ("M-," . xref-go-back)
+        ("M-?" . xref-find-references)
+        ("C-h ." . lsp-describe-thing-at-point)
+        ("C-c l s" . lsp-workspace-symbol)
+        ("C-c l r" . lsp-rename)
+        ("C-c l a" . lsp-execute-code-action)
+        ("C-c l d" . flymake-show-buffer-diagnostics)
+        ("C-c l D" . lsp-diagnostics)
+        ("C-c p" . previous-error)
+        ("C-c n" . next-error)
+        ("C-c l f" . lsp-format-buffer)))
 
 (use-package emmet-mode
   :ensure t
@@ -1100,8 +1090,6 @@ Won't clobber a manually renamed tab."
   (apheleia-global-mode +1)
 
   :config
-  (setf (alist-get 'ruff-format apheleia-formatters)
-        '("ruff" "format" "-"))
   (setf (alist-get 'oxfmt apheleia-formatters)
         '("oxfmt" "--stdin"))
 
@@ -1112,9 +1100,6 @@ Won't clobber a manually renamed tab."
   ;; (setf (alist-get 'ruff-fix+format apheleia-formatters)
   ;;       '((:formatter "ruff" "check" "--fix" "--exit-zero" "--stdin-filename" filepath "-")
   ;;         (:formatter "ruff" "format" "-")))
-
-  (setf (alist-get 'python-mode apheleia-mode-alist) 'ruff-format)
-  (setf (alist-get 'python-ts-mode apheleia-mode-alist) 'ruff-format)
 
   (dolist (mode '(js-mode js-ts-mode
                           typescript-mode typescript-ts-mode
