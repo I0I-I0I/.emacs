@@ -10,12 +10,6 @@
 (defvar my/gc-cons-threshold-orig gc-cons-threshold)
 (defvar my/gc-cons-percentage-orig gc-cons-percentage)
 
-(set-language-environment 'utf-8)
-(set-locale-environment "utf-8")
-
-(setq buffer-file-coding-system 'utf-8)
-(prefer-coding-system 'utf-8)
-
 ;; Fix encoding
 (defun my/revert-buffer-utf8 ()
   "Revert current buffer using UTF-8 (unix) without confirmation."
@@ -25,15 +19,6 @@
     (revert-buffer :ignore-auto :noconfirm)))
 
 (global-set-key (kbd "C-c u") #'my/revert-buffer-utf8)
-
-(set-language-environment "UTF-8")
-(set-default-coding-systems 'utf-8-unix)
-(set-terminal-coding-system 'utf-8-unix)
-(set-keyboard-coding-system 'utf-8-unix)
-(prefer-coding-system 'utf-8-unix)
-(setq default-process-coding-system '(utf-8-unix . utf-8-unix))
-(setq file-name-coding-system 'utf-8-unix)
-(setq locale-coding-system 'utf-8-unix)
 
 ;; Set PATH
 (defun my/add-to-path (dir)
@@ -48,7 +33,8 @@
 ;;; windows specific
 (when (eq system-type 'windows-nt)
   (my/add-to-path "C:/Program Files/Git/usr/bin")
-  (my/add-to-path "D:/programm/vips/bin"))
+  (my/add-to-path "D:/apps/texlive/2026/bin/windows")
+  (my/add-to-path "D:/apps/vips/bin"))
 
 ;;; Override map
 (defvar my/override-map (make-sparse-keymap))
@@ -77,50 +63,6 @@
 (setq use-package-always-ensure t
       use-package-verbose nil)
 
-;; Tab naming helpers
-(defun my/tab-context-name ()
-  "Project name or fallback to directory name."
-  (or (when-let* ((proj (project-current nil)))
-        (file-name-nondirectory
-         (directory-file-name (project-root proj))))
-      (file-name-nondirectory
-       (directory-file-name default-directory))))
-
-(defun my/tab--get (key &optional tab)
-  "Get KEY from TAB alist (defaults to current tab)."
-  (alist-get key (or tab (tab-bar--current-tab))))
-
-(defun my/tab--set (key value &optional tab)
-  "Set KEY to VALUE in TAB alist (defaults to current tab)."
-  (let* ((tab (or tab (tab-bar--current-tab)))
-         (cell (assq key tab)))
-    (if cell
-        (setcdr cell value)
-      (setcdr tab (cons (cons key value) (cdr tab)))))
-  value)
-
-(defun my/tab-auto-rename (&rest _)
-  "Auto-rename current tab to match project/directory context.
-Won't clobber a manually renamed tab."
-  (when (bound-and-true-p tab-bar-mode)
-    (let* ((name (my/tab-context-name))
-           (tab  (tab-bar--current-tab))
-           (cur  (alist-get 'name tab))
-           (last (my/tab--get 'my/auto-name tab)))
-      (when (and name
-                 (not (equal name last))
-                 (or (null last) (equal cur last)))
-        (my/tab--set 'my/auto-name name tab)
-        (tab-bar-rename-tab name)))))
-
-(defun my/tab-rename-to-context ()
-  "Force rename current tab to context name (overwrites manual name)."
-  (interactive)
-  (let ((name (my/tab-context-name)))
-    (when name
-      (my/tab--set 'my/auto-name name)
-      (tab-bar-rename-tab name))))
-
 ;; Core
 (use-package emacs
   :ensure nil
@@ -144,12 +86,6 @@ Won't clobber a manually renamed tab."
   (when (boundp 'native-comp-deferred-compilation)
     (setq native-comp-deferred-compilation t))
 
-  (add-hook 'emacs-startup-hook
-            (lambda ()
-              (setq gc-cons-threshold my/gc-cons-threshold-orig
-                    gc-cons-percentage my/gc-cons-percentage-orig)
-              (run-with-idle-timer 5 nil #'garbage-collect)))
-
   (run-with-idle-timer 10 t #'garbage-collect)
 
   (setq-default fill-column 120
@@ -168,6 +104,23 @@ Won't clobber a manually renamed tab."
   (tool-bar-mode -1)
   (scroll-bar-mode -1)
 
+  ;; (treesit-auto-install-grammar 'always)
+  ;; (treesit-enabled-modes t)
+
+  ;; (delete-pair-push-mark t)                    ; EMACS-31: pushes a mark after
+  ;;                                       ; delete-pair so C-x C-x selects what was inside
+  ;; (ibuffer-human-readable-size t)              ; EMACS-31: KB/MB instead of raw byte counts
+  ;; (ielm-history-file-name ...)                 ; EMACS-31: IELM input history is finally persisted
+  ;; (kill-region-dwim 'emacs-word)               ; EMACS-31: C-w with no region kills a word
+  ;; (native-comp-async-on-battery-power nil)     ; EMACS-31: stop native-comp jobs on battery
+  ;; (view-lossage-auto-refresh t)                ; EMACS-31: live-updating C-h l, great for teaching/debugging
+  ;; (display-fill-column-indicator-warning nil)  ; EMACS-31
+  ;; (dired-hide-details-hide-absolute-location t); EMACS-31: hide the absolute dir path in dired-hide-details-mode
+  ;; (world-clock-sort-order "%FT%T")             ; EMACS-31: sort the world clock sanely
+  ;; (zone-all-frames t)                          ; EMACS-31
+  ;; (zone-all-windows-in-frame t)                ; EMACS-31
+  ;; (uniquify-after-kill-buffer-flag t)
+
   (add-hook 'before-save-hook #'delete-trailing-whitespace)
   (save-place-mode 1)
   (global-hl-line-mode 1)
@@ -176,6 +129,14 @@ Won't clobber a manually renamed tab."
   (global-auto-revert-mode 1)
   (setq auto-revert-interval 1)
   (setq auto-revert-verbose nil)
+
+  (global-visual-line-mode 1)
+  (defun my-disable-visual-line-and-truncate ()
+    (when (bound-and-true-p visual-line-mode) (visual-line-mode -1))
+    (when (bound-and-true-p truncate-lines) (toggle-truncate-lines)))
+
+  (add-hook 'ibuffer-mode-hook 'my-disable-visual-line-and-truncate)
+  (add-hook 'buffer-menu-mode-hook 'my-disable-visual-line-and-truncate)
 
   (fset 'yes-or-no-p 'y-or-n-p)
   (setq savehist-additional-variables '(register-alist))
@@ -201,11 +162,6 @@ Won't clobber a manually renamed tab."
   (defun scroll-half-page-up ()
     (interactive)
     (scroll-up (/ (window-body-height) 2)))
-
-  (define-prefix-command 'my/c-z-map)
-  (defvar my/c-z-z-map (make-sparse-keymap))
-  (define-key global-map (kbd "C-z") my/c-z-map)
-  (define-key my/c-z-map (kbd "z") my/c-z-z-map)
 
   ;; Move text
   (defun move-text-internal (arg)
@@ -285,11 +241,26 @@ Won't clobber a manually renamed tab."
          :map dired-mode-map
          ("z" . crux-open-with)))
 
-;;; Ligature
+;;; Font
 (use-package ligature
   :config
   (ligature-set-ligatures 't '("==" "!=" "===" "!==" "&&" "||" "!!" ">>" "<<"))
   (global-ligature-mode t))
+
+(use-package fontaine
+  :custom
+  (fontaine-presets
+   '((maple-mono
+      :default-family "Maple Mono"
+      :default-height 140
+      :line-spacing 1)
+     (cascadia
+      :default-family "Cascadia Code"
+      :default-height 140
+      :line-spacing 1)))
+  :config
+  (fontaine-mode t)
+  (fontaine-set-preset 'maple-mono))
 
 ;;; Which key
 (use-package which-key
@@ -302,27 +273,6 @@ Won't clobber a manually renamed tab."
   :ensure t
   :config
   (editorconfig-mode 1))
-
-;;; Tab-bar
-(use-package tab-bar
-  :ensure nil
-  :demand t
-  :init
-  (tab-bar-mode 1)
-  :custom
-  (tab-bar-close-button-show nil)
-  (tab-bar-new-button-show nil)
-  (tab-bar-show nil)
-  (tab-bar-new-tab-choice "*scratch*")
-  (tab-bar-new-tab-name-function #'my/tab-context-name)
-  :config
-  (tab-bar-history-mode 1)
-  (set-face-attribute 'tab-bar nil :height 160)
-  (add-hook 'buffer-list-update-hook #'my/tab-auto-rename)
-  (with-eval-after-load 'project
-    (add-hook 'project-switch-hook #'my/tab-auto-rename))
-  :bind
-  (("C-x t R" . my/tab-rename-to-context)))
 
 ;;; Server
 (use-package server
@@ -344,6 +294,14 @@ Won't clobber a manually renamed tab."
   :config
   (rg-enable-default-bindings)
   (rg-enable-menu))
+
+;; Surround
+
+(use-package emacs-surround
+  :vc (:url "https://github.com/ganmacs/emacs-surround"
+            :rev :newest
+            :branch "master")
+  :bind ("C-q" . emacs-surround))
 
 ;; Completion
 (use-package corfu
@@ -409,31 +367,6 @@ Won't clobber a manually renamed tab."
                           (ibuffer-auto-mode 1)
                           (ibuffer-switch-to-saved-filter-groups "default")))
   :config
-  (setq ibuffer-saved-filter-groups
-        '(("default"
-           ("Code" (derived-mode . prog-mode))
-           ("EAF" (mode . eaf-mode))
-           ("Org" (or (mode . org-mode)
-                      (filename . "\\.org$")))
-           ("Shell" (or (mode . eshell-mode)
-                        (mode . vterm-mode)
-                        (mode . shell-mode)
-                        (mode . term-mode)))
-           ("Emacs" (or (name . "^\\*scratch\\*$")
-                        (name . "^\\*Help\\*$")
-                        (name . "^\\*Buffer List\\*$")
-                        (name . "^\\*eaf\\*$")
-                        (name . "^\\*eaf-epc.*\\*$")
-                        (name . "^\\*Disabled command\\*$")
-                        (name . "^\\*Async-native-compile-log\\*$")
-                        (name . "^\\*Messages\\*$")
-                        (name . "^\\*Backtrace\\*$")
-                        (name . "^\\*Warnings\\*$")
-                        (name . "^\\*Completions\\*$")))
-           ("Dired" (mode . dired-mode))
-           ("Magit" (name . "^\\*magit"))
-           ("Process" (name . "^\\*")))))
-
   (setq ibuffer-show-empty-filter-groups nil
         ibuffer-always-show-last-buffer nil
         ibuffer-default-sorting-mode 'recency
@@ -446,28 +379,6 @@ Won't clobber a manually renamed tab."
          ("C-c / n" . ibuffer-filter-by-name)
          ("C-c / f" . ibuffer-filter-by-filename)
          ("C-c / c" . ibuffer-clear-filter-groups)))
-
-(use-package bufferlo
-  :ensure t
-  :after ibuffer
-  :demand t
-  :config
-  (unless (fboundp 'bufferlo--ibuffer-do-bufferlo-remove-prompt)
-    (defun bufferlo--ibuffer-do-bufferlo-remove-prompt (op)
-      "`ibuffer' prompt helper for OP."
-      (let ((bookmark-name (when (fboundp 'bufferlo--current-bookmark-name)
-                             (bufferlo--current-bookmark-name))))
-        (format "%s from %slocals:" op
-                (if bookmark-name
-                    (format-message "bufferlo bookmark `%s' " bookmark-name)
-                  "")))))
-  (bufferlo-mode 1)
-  :bind (("C-x b" . bufferlo-switch-to-buffer)
-         ("C-x B" . bufferlo-find-buffer-switch)
-         ("C-x C-M-b" . bufferlo-ibuffer-orphans)
-         ("C-x C-b" . bufferlo-ibuffer)
-         ("C-x C-S-B" . ibuffer)
-         ("C-x t 0" . bufferlo-tab-close-kill-buffers)))
 
 ;;; Tramp
 (use-package tramp
@@ -491,42 +402,6 @@ Won't clobber a manually renamed tab."
   (setq auth-source-cache-expiry nil)
   (add-to-list 'backup-directory-alist
                (cons tramp-file-name-regexp "~/.emacs.d/tramp-backups/")))
-
-;; Desktop (restore session)
-(use-package desktop
-  :ensure nil
-  :init
-  (setq desktop-dirname             (expand-file-name "desktop/" user-emacs-directory)
-        desktop-base-file-name      "desktop"
-        desktop-base-lock-name      "lock"
-        desktop-path               (list desktop-dirname)
-        desktop-save               t
-        desktop-load-locked-desktop t
-        desktop-restore-frames      t)
-
-  (setq desktop-files-not-to-save
-        (concat desktop-files-not-to-save
-                "\\|\\`/ssh:"
-                "\\|\\`/sudo:"
-                "\\|\\`/docker:"
-                "\\|\\`/scp:"
-                "\\|\\`/rsync:"))
-
-  (setq desktop-buffers-not-to-save
-        (concat "\\` "
-                "\\|\\`\\*Messages\\*\\'"
-                "\\|\\`\\*scratch\\*\\'"
-                "\\|\\`\\*Help\\*\\'"
-                "\\|\\`\\*Compile-Log\\*\\'"
-                "\\|\\`\\*Warnings\\*\\'"
-                "\\|\\`\\*Async-native-compile-log\\*\\'"
-                "\\|\\`\\*tramp/.*\\*\\'"))
-  (add-to-list 'desktop-modes-not-to-save 'ibuffer-mode)
-  :config
-  (with-eval-after-load 'desktop (require 'org))
-  (make-directory desktop-dirname t)
-  (desktop-save-mode 1)
-  (remove-hook 'window-setup-hook #'desktop-read))
 
 ;; Eshell
 (use-package eshell
@@ -671,6 +546,7 @@ Won't clobber a manually renamed tab."
               (keymap-set eshell-mode-map "C-r" #'my/eshell-history-fuzzy)
               (keymap-set eshell-mode-map "C-l" #'eshell/clear))))
 
+
 ;; Undo
 (use-package undo-tree
   :ensure t
@@ -720,10 +596,26 @@ Won't clobber a manually renamed tab."
             :branch "master")
   :bind (("C-x v t" . git-timemachine)))
 
-;; Selection
-(use-package expand-region
+;; Treesitter
+(setq treesit-language-source-alist
+      '((elisp "https://github.com/Wilfred/tree-sitter-elisp")))
+
+(use-package treesit-auto
   :ensure t
-  :bind (("M-h" . er/expand-region)))
+  :custom
+  (treesit-auto-install t)
+  :config
+  (treesit-auto-add-to-auto-mode-alist 'all)
+  (global-treesit-auto-mode))
+
+;; Selection
+;; (use-package expand-region
+;;   :ensure t
+;;   :bind (("M-h" . er/expand-region)))
+
+(use-package expreg
+  :bind (("M-h" . expreg-expand)
+         ("M-H" . expreg-contract)))
 
 ;; Multi cursors
 (use-package multiple-cursors
@@ -791,13 +683,6 @@ Won't clobber a manually renamed tab."
               ("M-8" . harpoon-go-to-8)
               ("M-9" . harpoon-go-to-9)))
 
-;; Treesitter
-(use-package treesit-auto
-  :ensure t
-  :config
-  (treesit-auto-add-to-auto-mode-alist 'all)
-  (global-treesit-auto-mode))
-
 (use-package emmet-mode
   :ensure t
   :hook ((html-mode css-mode sgml-mode web-mode js-jsx-mode tsx-ts-mode) . emmet-mode))
@@ -805,27 +690,30 @@ Won't clobber a manually renamed tab."
 ;; Docker
 (use-package docker
   :ensure t
-  :bind ("C-z d" . docker))
+  :bind ("C-c D" . docker))
 
 ;; AI
 (use-package copilot
   :ensure t
-  :bind (("C-z A" . copilot-mode)
+  :bind (("C-c A" . copilot-mode)
          :map copilot-completion-map
          ("<tab>" . copilot-accept-completion)
          ("TAB" . copilot-accept-completion)))
 
+;; (use-package codeium
+;;   :vc (:url "https://github.com/Exafunction/codeium.el"
+;;             :rev :newest)
+;;   :init
+;;   (add-to-list 'completion-at-point-functions #'codeium-completion-at-point))
+
 (use-package agent-shell
   :ensure t
   :config
-  (add-to-list 'agent-shell-engines
-               '(agy . (:command ("agy" "--experimental-acp")
-                                 :name "Antigravity Agent")))
   ;; (setq agent-shell-openai-authentication
   ;;       (agent-shell-openai-make-authentication :login t))
   (setq agent-shell-google-authentication
         (agent-shell-google-make-authentication :login t))
-  :bind (("C-z a" . agent-shell)
+  :bind (("C-c a" . agent-shell)
          :map agent-shell-mode-map
          ("RET" . newline)
          ("C-c C-c" . shell-maker-submit)
@@ -834,10 +722,8 @@ Won't clobber a manually renamed tab."
 ;; Zen mode
 (use-package sublimity
   :ensure t
-  :config
-  ;; (require 'sublimity-scroll)
-  (require 'sublimity-attractive)
-  :bind (("C-z Z" . sublimity-mode)))
+  :config (require 'sublimity-attractive)
+  :bind (("C-c z" . sublimity-mode)))
 
 ;; Dirvish
 (use-package dirvish
@@ -847,6 +733,12 @@ Won't clobber a manually renamed tab."
     :ensure nil
     :hook (dired-mode . dired-omit-mode)
     :custom (dired-omit-files (rx string-start (or "." "..") string-end)))
+
+  (use-package dired-clipboard
+    :vc (:url "https://github.com/kn66/dired-clipboard.el"
+              :rev :newest
+              :branch "main")
+    :hook (dired-mode . dired-clipboard-mode))
 
   (use-package ready-player
     :ensure t
@@ -889,88 +781,159 @@ Won't clobber a manually renamed tab."
               ("l" . dired-find-file)
               ("<backtab>" . dirvish-layout-toggle)))
 
-;; Translate
-(use-package gt
-  :ensure t
+(use-package perspective
+  :bind
+  (("C-x C-S-b" . persp-ibuffer)
+   ("C-x C-b" . persp-buffer-menu)
+   ("C-x b" . persp-switch-to-buffer*)
+   ("C-x B" . persp-switch-to-buffer)
+   ("C-x k" . persp-kill-buffer*)
+   ("C-c p l" . persp-switch-last))
   :init
-  (use-package posframe :ensure t)
-  (setq gt-langs '(auto ru))
+  (setq switch-to-prev-buffer-skip
+        (lambda (win buff bury-or-kill)
+          (not (persp-is-current-buffer buff))))
 
+  (add-hook 'ibuffer-hook
+            (lambda ()
+              (persp-ibuffer-set-filter-groups)
+              (unless (eq ibuffer-sorting-mode 'alphabetic)
+                (ibuffer-do-sort-by-alphabetic))))
+
+  (add-hook 'kill-emacs-hook #'persp-state-save)
+
+  (add-hook
+   'emacs-startup-hook
+   (lambda ()
+     (when (file-exists-p persp-state-default-file)
+       (persp-state-load persp-state-default-file))))
+
+  :custom
+  (persp-mode-prefix-key (kbd "C-c p"))
+  (persp-state-default-file
+   (expand-file-name "perspective-session" user-emacs-directory))
+  :init
+  (persp-mode))
+
+;; Org mode
+(use-package org-tempo
+  :ensure nil)
+
+(use-package valign
+  :ensure t
+  :hook
+  (org-mode-hook . valign-mode))
+
+(use-package org-fragtog
+  :ensure t
+  :hook (org-mode-hook . org-fragtog-mode))
+
+(use-package org-appear
+  :vc (:url "https://github.com/awth13/org-appear"
+            :rev :newest
+            :branch "master")
+  :custom
+  (org-appear-autolinks t)
+  :hook (org-mode-hook . org-appear-mode))
+
+(use-package org-modern
+  :ensure t
+  :hook
+  (org-mode . org-modern-mode)
+  :init
+  (add-hook 'org-agenda-finalize-hook #'org-modern-agenda))
+
+(use-package org
+  :ensure nil                     ; Built into Emacs
+  :mode ("\\.org\\'" . org-mode)
+  :hook
+  ((org-mode . visual-line-mode)
+   (org-mode . variable-pitch-mode)
+   (org-mode . org-indent-mode))
+  :custom
+  ;; Editing
+  (org-startup-indented t)
+  (org-hide-emphasis-markers t)
+  (org-pretty-entities t)
+  (org-ellipsis " ▾")
+  (org-return-follows-link t)
+  (org-src-fontify-natively t)
+  (org-src-tab-acts-natively t)
+  (org-edit-src-content-indentation 0)
+  (org-confirm-babel-evaluate nil)
+
+  (org-startup-with-inline-images t)
+  (org-startup-with-latex-preview t)
+
+  (org-preview-latex-default-process 'dvipng)
+  (org-format-latex-options
+      (plist-put org-format-latex-options :scale 1.6))
+
+  (org-log-done 'time)
   :config
-  (require 'gt-render-posframe)
+  (org-babel-do-load-languages
+   'org-babel-load-languages
+   '((emacs-lisp . t)
+     (python . t)
+     (shell . t))))
 
-  (defvar my/gt-target-langs
-    '(("ru" . ru)
-      ("en" . en)
-      ("de" . de)
-      ("ja" . ja))
-    "Languages for gt target selection.")
+;; LSP
 
-  (defun my/gt-set-target-lang ()
-    "Set target language for gt keeping source as auto."
-    (interactive)
-    (let* ((choice (completing-read
-                    "Translate to: "
-                    (mapcar #'car my/gt-target-langs)
-                    nil t))
-           (lang (cdr (assoc choice my/gt-target-langs))))
-      (setq gt-langs (list 'auto lang))
-      (message "gt: auto -> %s" lang)))
+;; (use-package mason
+;;   :ensure t
+;;   :demand t
+;;   :config
+;;   (mason-setup))
 
-  (defun my/gt-translate-to ()
-    "Pick target language and translate."
-    (interactive)
-    (call-interactively #'my/gt-set-target-lang)
-    (gt-translate))
+;; (use-package lsp-mode
+;;   :ensure t
+;;   :init
+;;   (use-package flymake
+;;     :ensure t)
 
-  (with-eval-after-load 'gt
-    (with-eval-after-load 'gt-result
-      (define-key gt-result-mode-map (kbd "y") #'my/gt-copy-translation)))
+;;   :custom
+;;   (lsp-keymap-prefix "C-c l")
 
-  (setq gt-default-translator
-        (gt-translator
-         :taker (gt-taker
-                 :text (lambda ()
-                         (if (use-region-p)
-                             (buffer-substring-no-properties
-                              (region-beginning) (region-end))
-                           (or (current-kill 0 t) "")))
-                 :prompt nil
-                 :pick nil)
-         :engines (list (gt-google-engine))
-         :render (gt-posframe-pop-render
-                  :padding 10
-                  :forecolor "#ffffff"
-                  :backcolor "#222222"
-                  :frame-params (list :border-width 1))))
+;;   :hook
+;;   (((python-ts-mode typescript-ts-mode javascript-mode) . lsp-deferred)
+;;    (lsp-mode . lsp-enable-which-key-integration))
 
-  (with-eval-after-load 'gt
-    (defun my/gt-posframe-buffer ()
-      "Return buffer currently used by gt posframe."
-      (when (and (boundp 'gt--render) gt--render)
-        (let ((buf (plist-get gt--render :buffer)))
-          (when (buffer-live-p buf)
-            buf))))
+;;   :commands (lsp lsp-deferred)
 
-    (defun my/gt-copy-from-posframe ()
-      "Copy translation text from gt posframe."
-      (interactive)
-      (let ((buf (or (my/gt-posframe-buffer)
-                     (car (seq-filter
-                           (lambda (b)
-                             (string-match-p "\\*gt" (buffer-name b)))
-                           (buffer-list))))))
-        (unless (buffer-live-p buf)
-          (user-error "No gt translation buffer found"))
+;;   :config
+;;   (add-hook
+;;    'python-mode-hook
+;;    (lambda ()
+;;      (add-hook 'flymake-diagnostic-functions
+;;                #'flymake-ruff-load
+;;                nil t))))
 
-        (with-current-buffer buf
-          (let ((text (string-trim
-                       (buffer-substring-no-properties
-                        (point-min) (point-max)))))
-            (kill-new text)
-            (message "Translation copied")))))
+(use-package eglot
+  :ensure nil
+  :hook
+  ((python-ts-mode
+    python-mode
+    js-ts-mode
+    typescript-ts-mode
+    tsx-ts-mode
+    svelte-mode)
+   . eglot-ensure))
 
-    (global-set-key (kbd "C-M-c") #'my/gt-copy-from-posframe))
+(use-package svelte-ts-mode
+  :vc (:url "https://github.com/leafOfTree/svelte-ts-mode"
+            :rev :newest
+            :branch "main")
+  :after eglot
+  :ensure t)
 
-  :bind (("C-M-y" . gt-translate)
-         ("C-M-S-y" . my/gt-translate-to)))
+(use-package eglot-python-preset
+  :ensure t
+  :after eglot)
+
+(use-package eglot-typescript-preset
+  :ensure t
+  :after eglot)
+
+(use-package markdown-ts-mode
+  :ensure t
+  :defer t)
