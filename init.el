@@ -20,6 +20,12 @@
 
 (global-set-key (kbd "C-c u") #'my/revert-buffer-utf8)
 
+(prefer-coding-system 'utf-8)
+(set-language-environment "UTF-8")
+(set-default-coding-systems 'utf-8)
+(setq coding-system-for-read 'utf-8)
+(setq coding-system-for-write 'utf-8)
+
 ;; Set PATH
 (defun my/add-to-path (dir)
   (let ((path (expand-file-name dir)))
@@ -546,18 +552,21 @@
               (keymap-set eshell-mode-map "C-r" #'my/eshell-history-fuzzy)
               (keymap-set eshell-mode-map "C-l" #'eshell/clear))))
 
-
 ;; Undo
-(use-package undo-tree
-  :ensure t
-  :custom
-  (undo-tree-visualizer-timestamps t)
-  (undo-tree-history-directory-alist `(("." . ,(expand-file-name "undo-history" user-emacs-directory))))
-  (undo-tree-auto-save-history t)
-  (undo-limit 10000000)
-  (undo-strong-limit 10000000)
-  :config
-  (global-undo-tree-mode))
+(use-package undo-fu
+  :init
+  (use-package undo-fu-session
+    :config
+    (setq undo-fu-session-incompatible-files '("/COMMIT_EDITMSG\\'" "/git-rebase-todo\\'"))
+    (undo-fu-session-global-mode))
+
+  (use-package vundo
+    :custom
+    (vundo-glyph-alist vundo-unicode-symbols)
+    :bind ("C-x u" . vundo))
+
+  :bind (("C-/" . undo-fu-only-undo)
+         ("C-?" . undo-fu-only-redo)))
 
 ;; Git
 (use-package magit
@@ -609,10 +618,6 @@
   (global-treesit-auto-mode))
 
 ;; Selection
-;; (use-package expand-region
-;;   :ensure t
-;;   :bind (("M-h" . er/expand-region)))
-
 (use-package expreg
   :bind (("M-h" . expreg-expand)
          ("M-H" . expreg-contract)))
