@@ -876,7 +876,7 @@
   (org-startup-with-inline-images t)
   (org-startup-with-latex-preview t)
 
-  ; (org-preview-latex-default-process 'dvipng)
+                                        ; (org-preview-latex-default-process 'dvipng)
   (org-preview-latex-default-process 'dvisvgm)
   (org-format-latex-options
    (plist-put org-format-latex-options :scale 1.6))
@@ -957,6 +957,20 @@
   ("C-c l d" . flymake-show-buffer-diagnostics)
   ("C-c l D" . flymake-show-project-diagnostics)
   ("C-c l ?" . flymake-show-diagnostic))
+
+(use-package apheleia
+  :ensure t
+  :config
+  (dolist (mode '(js-ts-mode
+                  typescript-ts-mode
+                  tsx-ts-mode
+                  svelte-ts-mode))
+    (setf (alist-get mode apheleia-mode-alist) 'oxfmt))
+
+  (setf (alist-get 'python-ts-mode apheleia-mode-alist)
+        '(ruff-isort ruff))
+
+  (apheleia-global-mode +1))
 
 (use-package svelte-ts-mode
   :vc (:url "https://github.com/leafOfTree/svelte-ts-mode"
