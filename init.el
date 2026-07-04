@@ -219,6 +219,12 @@
 
 (use-package crux
   :ensure t
+  :preface
+  (declare-function crux-indent-region-region-or-buffer "crux")
+  (declare-function crux-untabify-region-or-buffer "crux")
+  (declare-function crux-comment-or-uncomment-region-region-or-line "crux")
+  (declare-function crux-kill-region-region-or-sexp-or-line "crux")
+  (declare-function crux-kill-ring-save-region-or-point-to-eol "crux")
   :config
   (crux-with-region-or-buffer indent-region)
   (crux-with-region-or-buffer untabify)
@@ -287,6 +293,20 @@
   :config
   (editorconfig-mode 1))
 
+;;; Spelling
+(use-package jinx
+  :ensure t
+  :hook (emacs-startup . global-jinx-mode)
+  :custom
+  (jinx-languages "en_US-large ru_RU")
+  :bind (("M-$" . jinx-correct)
+         ("C-M-$" . jinx-languages)
+         :map jinx-overlay-map
+         ("M-n" . nil)
+         ("M-p" . nil)
+         ("M-N" . jinx-next)
+         ("M-P" . jinx-previous)))
+
 ;;; Server
 (use-package server
   :ensure nil
@@ -323,6 +343,8 @@
 ;; Completion
 (use-package corfu
   :ensure t
+  :hook
+  (eshell-mode . (lambda () (setq-local corfu-auto nil)))
   :custom
   (corfu-auto t)
   (corfu-auto-delay 0.1)
@@ -333,17 +355,18 @@
   :config
   (setq tab-always-indent 'complete)
   (setq completion-cycle-threshold 3)
+  (require 'corfu-history)
+  (require 'corfu-popupinfo)
   (corfu-history-mode 1)
   (corfu-popupinfo-mode 1)
-  :init (global-corfu-mode)
-  :hook
-  (eshell-mode . (lambda () (setq-local corfu-auto nil))))
+  :init (global-corfu-mode))
 
 (use-package cape
   :ensure t
   :init
   (add-to-list 'completion-at-point-functions #'cape-file)
   (add-to-list 'completion-at-point-functions #'cape-dabbrev)
+  (require 'cape-keyword)
   (add-to-list 'completion-at-point-functions #'cape-keyword)
   (when (fboundp 'cape-symbol)
     (add-to-list 'completion-at-point-functions #'cape-symbol)))
@@ -421,20 +444,121 @@
                (cons tramp-file-name-regexp "~/.emacs.d/tramp-backups/")))
 
 ;; Eshell
+(use-package vterm
+  :ensure t
+  :commands (vterm)
+  :hook (vterm-mode . (lambda () (display-line-numbers-mode -1)))
+  :bind ("C-c t" . vterm))
+
 (use-package eshell
   :ensure nil
-  :hook (eshell-mode . (lambda ()
-                         (display-line-numbers-mode -1)
-                         (setq eshell-command-aliases-list
-                               '(("la" "ls -Alhvp --group-directories-first --color=always")
-                                 ("py" "uv run python")))))
-  :init
-  (use-package vterm
-    :ensure t
-    :commands (vterm)
-    :hook (vterm-mode . (lambda () (display-line-numbers-mode -1)))
-    :bind ("C-c t" . vterm))
+  :preface
+  (declare-function bash-completion-dynamic-complete-nocomint "bash-completion")
+  (declare-function eshell-bol "em-prompt")
+  (declare-function eshell/clear "em-script")
+  (declare-function w32-shell-execute "w32fns")
+  (require 'project)
+  (require 'ring)
+  (require 'seq)
+  (require 'subr-x)
 
+  (defun my/eshell--buffer-p (b)
+    (with-current-buffer b
+      (derived-mode-p 'eshell-mode)))
+
+  (defun my/eshell--buf-dir (b)
+    "Return normalized `default-directory` for eshell buffer B."
+    (with-current-buffer b
+      (expand-file-name default-directory)))
+
+  (defun my/eshell--current-dir ()
+    (expand-file-name default-directory))
+
+  (defun my/eshell--find-by-dir (dir)
+    "Find an existing eshell buffer whose `default-directory` matches DIR."
+    (let ((target (expand-file-name dir)))
+      (seq-find (lambda (b)
+                  (and (my/eshell--buffer-p b)
+                       (string= (my/eshell--buf-dir b) target)))
+                (buffer-list))))
+
+  (defun my/eshell--new-in-dir (dir)
+    "Create a new eshell buffer and start it in DIR."
+    (let ((default-directory dir))
+      (eshell t)))
+
+  (defvar my/eshell--return-buffers (make-hash-table :test 'eq :weakness 'key)
+    "Eshell buffers mapped to the buffer they should toggle back to.")
+
+  (defun my/eshell--open-new (dir origin)
+    "Create an eshell in DIR and remember ORIGIN as its return buffer."
+    (my/eshell--new-in-dir dir)
+    (when (my/eshell--buffer-p (current-buffer))
+      (puthash (current-buffer) origin my/eshell--return-buffers)))
+
+  (defun my/eshell--return-from (buf)
+    "Switch from eshell BUF back to its remembered buffer."
+    (let ((origin (gethash buf my/eshell--return-buffers)))
+      (if (buffer-live-p origin)
+          (switch-to-buffer origin)
+        (switch-to-buffer (other-buffer buf t)))))
+
+  (defun my/eshell--toggle-buffer (buf dir)
+    "Toggle to BUF, or create an eshell in DIR when BUF is nil."
+    (let ((origin (current-buffer)))
+      (cond
+       ((eq origin buf)
+        (my/eshell--return-from buf))
+       (buf
+        (puthash buf origin my/eshell--return-buffers)
+        (switch-to-buffer buf))
+       (t
+        (my/eshell--open-new dir origin)))))
+
+  (defun my/toggle-eshell-here (&optional new)
+    "Toggle an eshell buffer for the current directory.
+With prefix argument NEW, always create a new eshell buffer."
+    (interactive "P")
+    (let* ((dir (my/eshell--current-dir))
+           (buf (my/eshell--find-by-dir dir)))
+      (if new
+          (my/eshell--open-new dir (current-buffer))
+        (my/eshell--toggle-buffer buf dir))))
+
+  (defun my/eshell--project-dir ()
+    "Return project root if available, else current `default-directory`."
+    (if-let* ((pr (project-current nil)))
+        (expand-file-name (project-root pr))
+      (my/eshell--current-dir)))
+
+  (defun my/toggle-eshell-project (&optional new)
+    "Toggle an eshell buffer for the project root.
+With prefix argument NEW, always create a new eshell buffer."
+    (interactive "P")
+    (let* ((dir (my/eshell--project-dir))
+           (buf (my/eshell--find-by-dir dir)))
+      (if new
+          (my/eshell--open-new dir (current-buffer))
+        (my/eshell--toggle-buffer buf dir))))
+
+  (defun my/eshell-history-fuzzy ()
+    (interactive)
+    (require 'em-hist)
+    (let ((items (and eshell-history-ring
+                      (delete-dups (ring-elements eshell-history-ring)))))
+      (if (not items)
+          (user-error "No Eshell history")
+        (let ((choice (completing-read "Eshell history: " items nil t)))
+          (when (and choice (not (string-empty-p choice)))
+            (let ((bol (save-excursion
+                         (eshell-bol)
+                         (point))))
+              (delete-region bol (point))
+              (insert choice)))))))
+
+  :hook (eshell-mode . (lambda ()
+                         (display-line-numbers-mode -1)))
+  :init
   (use-package eat
     :ensure t
     :commands (eat eat-eshell-mode)
@@ -463,69 +587,28 @@
                 #'+eshell-bash-completion-capf-nonexclusive nil t))
     (add-hook 'eshell-mode-hook #'+eshell-setup-bash-completion-h))
 
-  (require 'seq)
-  (require 'subr-x)
-
-  (defun my/eshell--buffer-p (b)
-    (with-current-buffer b
-      (derived-mode-p 'eshell-mode)))
-
-  (defun my/eshell--buf-dir (b)
-    "Return normalized `default-directory` for eshell buffer B."
-    (with-current-buffer b
-      (file-truename (expand-file-name default-directory))))
-
-  (defun my/eshell--current-dir ()
-    (file-truename (expand-file-name default-directory)))
-
-  (defun my/eshell--find-by-dir (dir)
-    "Find an existing eshell buffer whose `default-directory` matches DIR."
-    (let ((target (file-truename (expand-file-name dir))))
-      (seq-find (lambda (b)
-                  (and (my/eshell--buffer-p b)
-                       (string= (my/eshell--buf-dir b) target)))
-                (buffer-list))))
-
-  (defun my/eshell--new-in-dir (dir)
-    "Create a new eshell buffer and start it in DIR."
-    (let ((default-directory dir))
-      (eshell t)))
-
-  (defun my/toggle-eshell-here ()
-    "Jump to an eshell buffer for the current directory, or create one."
-    (interactive)
-    (let* ((dir (my/eshell--current-dir))
-           (buf (my/eshell--find-by-dir dir)))
-      (if (derived-mode-p 'eshell-mode)
-          (my/eshell--new-in-dir dir)
-        (cond
-         (buf (switch-to-buffer buf))
-         (t   (my/eshell--new-in-dir dir))))))
-
-  (require 'project)
-
-  (defun my/eshell--project-dir ()
-    "Return project root if available, else current `default-directory`."
-    (if-let* ((pr (project-current nil)))
-        (file-truename (project-root pr))
-      (my/eshell--current-dir)))
-
-  (defun my/toggle-eshell-project ()
-    "Jump to an eshell buffer for the project root (or current dir), or create one."
-    (interactive)
-    (let* ((dir (my/eshell--project-dir))
-           (buf (my/eshell--find-by-dir dir)))
-      (if (derived-mode-p 'eshell-mode)
-          (my/eshell--new-in-dir dir)
-        (if buf
-            (switch-to-buffer buf)
-          (my/eshell--new-in-dir dir)))))
-
   :bind (("C-c e" . my/toggle-eshell-here)
          ("C-x p e" . my/toggle-eshell-project))
 
   :config
-  (setq eshell-visual-commands '()
+  (setq eshell-modules-list '(eshell-alias
+                              eshell-basic
+                              eshell-cmpl
+                              eshell-dirs
+                              eshell-glob
+                              eshell-hist
+                              eshell-ls
+                              eshell-pred
+                              eshell-prompt
+                              eshell-script
+                              eshell-term
+                              eshell-tramp
+                              eshell-unix)
+        eshell-command-aliases-list '(("la" "ls -Alhvp --group-directories-first --color=always")
+                                      ("ll" "ls -lh --group-directories-first --color=always")
+                                      ("py" "uv run python"))
+        eshell-save-history-on-exit t
+        eshell-visual-commands '()
         shell-browse-url-functions nil
         eshell-cmpl-cycle-completions nil
         eshell-cmpl-ignore-case t
@@ -540,23 +623,11 @@
         eshell-prefer-lisp-functions nil)
 
   (defun eshell/o (&rest args)
-    (let ((target (string-join args " ")))
+    (let ((target (if args (string-join args " ") ".")))
       (cond ((eq system-type 'darwin) (start-process "open" nil "open" target))
             ((eq system-type 'windows-nt) (w32-shell-execute "open" target))
-            (t (start-process "xdg-open" nil "xdg-open" target)))))
-
-  (defun my/eshell-history-fuzzy ()
-    (interactive)
-    (require 'em-hist)
-    (let* ((items (and eshell-history-ring
-                       (delete-dups (ring-elements eshell-history-ring))))
-           (choice (completing-read "Eshell history: " items nil t)))
-      (when (and choice (not (string-empty-p choice)))
-        (let ((bol (save-excursion
-                     (eshell-bol)
-                     (point))))
-          (delete-region bol (point))
-          (insert choice)))))
+            ((executable-find "xdg-open") (start-process "xdg-open" nil "xdg-open" target))
+            (t (user-error "No opener found")))))
 
   (add-hook 'eshell-mode-hook
             (lambda ()
@@ -608,6 +679,7 @@
   :init
   (add-hook 'magit-post-refresh-hook 'diff-hl-magit-post-refresh)
   (global-diff-hl-mode)
+  (require 'diff-hl-show-hunk)
   (global-diff-hl-show-hunk-mouse-mode))
 
 (use-package git-timemachine
@@ -645,8 +717,8 @@
   :demand t
   :bind (("M-n" . mc/mark-next-like-this)
          ("M-p" . mc/mark-previous-like-this)
-         ("M-S-n" . mc/skip-to-next-like-this)
-         ("M-S-p" . mc/skip-to-previous-like-this)
+         ("M-N" . mc/skip-to-next-like-this)
+         ("M-P" . mc/skip-to-previous-like-this)
          ("C-c M-n" . mc/mark-all-like-this)
          ("C-c C-a" . mc/edit-lines)))
 
@@ -659,13 +731,13 @@
 
 (use-package better-jumper
   :ensure t
+  :preface
+  (defun my/better-jumper--set-jump-before (&rest _)
+    (better-jumper-set-jump))
   :init
   (better-jumper-mode 1)
   :config
   (setq better-jumper-context 'window)
-
-  (defun my/better-jumper--set-jump-before (&rest _)
-    (better-jumper-set-jump))
 
   (dolist (cmd '(xref-find-definitions
                  xref-find-references
@@ -745,64 +817,65 @@
   :config (require 'sublimity-attractive)
   :bind (("C-c z" . sublimity-mode)))
 
-;; Dirvish
-(use-package dirvish
-  :ensure t
-  :init
-  (use-package dired
-    :ensure nil
-    :hook (dired-mode . dired-omit-mode)
-    :custom (dired-omit-files (rx string-start (or "." "..") string-end)))
-
-  (use-package dired-clipboard
-    :vc (:url "https://github.com/kn66/dired-clipboard.el"
-              :rev :newest
-              :branch "main")
-    :hook (dired-mode . dired-clipboard-mode))
-
-  (use-package ready-player
-    :ensure t
-    :custom
-    (ready-player-autoplay nil)
-    (ready-player-thumbnail-max-pixel-height 600)
-    :config (ready-player-mode))
-
-  (use-package dired-preview
-    :ensure t
-    :custom
-    (dired-preview-delay 0.2)
-    (dired-preview-max-size (expt 2 20))
-    (dired-preview-ignored-extensions-regexp nil)
-    :config
-    (defun my/dired-preview-display-action-alist ()
-      `((display-buffer-in-side-window)
-        (side . right)
-        (window-width . 0.65)))
-    (setq dired-preview-display-action-alist #'my/dired-preview-display-action-alist)
-    (defun my/dired-preview-recenter (file)
-      (when-let* ((buf (dired-preview--get-preview-buffer file))
-                  (win (get-buffer-window buf)))
-        (with-selected-window win
-          (goto-char (point-min))
-          (recenter 0))))
-    (advice-add 'dired-preview-display-file :after #'my/dired-preview-recenter)
-    :bind (:map dired-mode-map
-                ("C-c p" . dired-preview-mode)))
-
-  (dirvish-override-dired-mode)
-  :hook (dired-mode . (lambda () (display-line-numbers-mode -1)))
+;; Dired
+(use-package dired
+  :ensure nil
+  :hook
+  (dired-mode . dired-omit-mode)
+  (dired-mode . (lambda () (display-line-numbers-mode -1)))
   :custom
-  (dirvish-attributes '(vc-state subtree-state collapse git-msg file-size file-time))
+  (dired-omit-files (rx string-start (or "." "..") string-end))
+  (dired-isearch-filenames 'dwim)
+  (dired-create-destination-dirs 'always)
+  (dired-create-destination-dirs-on-trailing-dirsep t)
+  (confirm-nonexistent-file-or-buffer nil)
+  (delete-by-moving-to-trash 'move-file-to-trash)
   (dired-listing-switches
    (if (eq system-type 'darwin)
        "-alh"
      "-alh --group-directories-first"))
-  :config (dirvish-side-follow-mode)
-  :bind (:map dirvish-mode-map
-              ("TAB" . dirvish-subtree-toggle)
+  :config
+  (defun dired-subdir-aware (orig-fun &rest args)
+    (if (eq major-mode 'dired-mode)
+        (let ((default-directory (dired-current-directory)))
+          (apply orig-fun args))
+      (apply orig-fun args)))
+
+  (dolist (fun '(find-file-read-args ido-expand-directory))
+    (advice-add fun :around 'dired-subdir-aware))
+  :bind (:map dired-mode-map
               ("h" . dired-up-directory)
               ("l" . dired-find-file)
-              ("<backtab>" . dirvish-layout-toggle)))
+              ("C-u i" . dired-kill-subdir)))
+
+(use-package dired-clipboard
+  :vc (:url "https://github.com/kn66/dired-clipboard.el"
+            :rev :newest
+            :branch "main")
+  :hook (dired-mode . dired-clipboard-mode))
+
+(use-package ready-player
+  :ensure t
+  :custom
+  (ready-player-autoplay nil)
+  (ready-player-thumbnail-max-pixel-height 500)
+  :config (ready-player-mode))
+
+(use-package dired-preview
+  :ensure t
+  :custom
+  (dired-preview-delay 0.2)
+  (dired-preview-max-size (expt 2 20))
+  (dired-preview-ignored-extensions-regexp nil)
+  (dired-preview-display-action-alist
+   '((display-buffer-in-side-window)
+     (side . right)
+     (window-width . 0.5)
+     (preserve-size . (t . t))))
+  :bind (:map dired-mode-map
+              ("C-c C-p" . dired-preview-mode)))
+
+;; Tmux  Perspective
 
 (use-package perspective
   :bind
@@ -847,6 +920,24 @@
   :hook
   (org-mode-hook . valign-mode))
 
+(use-package org-download
+  :ensure t
+  :vc (:url "https://github.com/abo-abo/org-download"
+            :rev :newest
+            :branch "master")
+  :hook
+  (dired-mode-hook . org-download-enable)
+  :custom
+  (org-download-method 'directory)
+  (org-download-image-dir "images")
+  (org-download-heading-lvl nil)
+  (org-download-timestamp "%Y%m%d-%H%M%S_")
+
+  :bind
+  (:map org-mode-map
+        ("C-c C-y" . org-download-clipboard)
+        ("C-c C-d" . org-download-delete)))
+
 (use-package org-fragtog
   :ensure t
   :hook (org-mode-hook . org-fragtog-mode))
@@ -887,6 +978,7 @@
   (org-src-tab-acts-natively t)
   (org-edit-src-content-indentation 0)
   (org-confirm-babel-evaluate #'my/org-confirm-babel-evaluate)
+  (org-startup-with-inline-images t)
 
   (org-startup-with-inline-images t)
   (org-startup-with-latex-preview t)
@@ -910,7 +1002,7 @@
   :ensure t
   :demand t
   :config
-  (mason-setup))
+  (mason-ensure))
 
 (use-package eglot
   :ensure nil
