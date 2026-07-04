@@ -1,7 +1,7 @@
 ;;; init.el --- Emacs init -*- lexical-binding: t; -*-
 
 (setq custom-file (expand-file-name "custom.el" user-emacs-directory))
-(load custom-file)
+(load custom-file 'noerror)
 
 (push '(fullscreen . maximized) default-frame-alist)
 (add-to-list 'default-frame-alist '(undecorated . t))
@@ -23,8 +23,7 @@
 (prefer-coding-system 'utf-8)
 (set-language-environment "UTF-8")
 (set-default-coding-systems 'utf-8)
-(setq coding-system-for-read 'utf-8)
-(setq coding-system-for-write 'utf-8)
+(setq-default buffer-file-coding-system 'utf-8-unix)
 
 ;; Set PATH
 (defun my/add-to-path (dir)
@@ -32,9 +31,10 @@
     (when (file-directory-p path)
       (unless (member path exec-path)
         (setq exec-path (cons path exec-path)))
-      (let ((current (getenv "PATH")))
-        (unless (string-match-p (regexp-quote path) current)
-          (setenv "PATH" (concat path path-separator current)))))))
+      (let* ((current (or (getenv "PATH") ""))
+             (parts (split-string current path-separator t)))
+        (unless (member path parts)
+          (setenv "PATH" (mapconcat #'identity (cons path parts) path-separator)))))))
 
 (my/add-to-path "~/.emacs.d/mason/bin")
 
@@ -61,10 +61,10 @@
         ("melpa"  . "https://melpa.org/packages/")))
 
 (package-initialize)
-(unless package-archive-contents
-  (package-refresh-contents))
 
 (unless (package-installed-p 'use-package)
+  (unless package-archive-contents
+    (package-refresh-contents))
   (package-install 'use-package))
 
 (require 'use-package)
@@ -86,8 +86,11 @@
   (setq gc-cons-threshold (* 64 1024 1024)
         gc-cons-percentage 0.1
         read-process-output-max (* 4 1024 1024)
-        auto-save-default nil
-        make-backup-files nil)
+        auto-save-default t
+        make-backup-files t
+        backup-directory-alist `(("." . ,(expand-file-name "backups/" user-emacs-directory)))
+        auto-save-file-name-transforms
+        `((".*" ,(expand-file-name "auto-save-list/" user-emacs-directory) t)))
 
   (when (boundp 'native-comp-async-report-warnings-errors)
     (setq native-comp-async-report-warnings-errors nil))
@@ -129,7 +132,9 @@
   ;; (zone-all-windows-in-frame t)                ; EMACS-31
   ;; (uniquify-after-kill-buffer-flag t)
 
-  (add-hook 'before-save-hook #'delete-trailing-whitespace)
+  (add-hook 'prog-mode-hook
+            (lambda ()
+              (add-hook 'before-save-hook #'delete-trailing-whitespace nil t)))
   (save-place-mode 1)
   (global-hl-line-mode 1)
   (repeat-mode 1)
@@ -222,7 +227,7 @@
   (crux-with-region-or-point-to-eol kill-ring-save)
   :bind (("C-a"     . crux-move-beginning-of-line)
          ;; ("C-c o"   . crux-open-with)
-         ("C-c D"   . crux-delete-file-and-buffer)
+         ("C-c C-D" . crux-delete-file-and-buffer)
          ("C-c r"   . crux-rename-file-and-buffer)
          ("C-c k"   . crux-kill-other-buffers)
          ("C-c d"   . crux-duplicate-current-line-or-region)
@@ -230,8 +235,8 @@
          ("C-c n"   . crux-cleanup-buffer-or-region)
          ("C-c f"   . crux-recentf-find-file)
          ("C-c F"   . crux-recentf-find-directory)
-         ("C-c u"   . crux-view-url)
-         ("C-c e"   . crux-eval-and-replace)
+         ("C-c U"   . crux-view-url)
+         ("C-c E"   . crux-eval-and-replace)
          ("C-c s"   . crux-swap-windows)
          ("C-c w"   . crux-copy-file-preserve-attributes)
          ("C-c I"   . crux-find-user-init-file)
@@ -286,7 +291,11 @@
 (use-package server
   :ensure nil
   :config
-  (unless (server-running-p) (server-start)))
+  (unless (or noninteractive (server-running-p))
+    (condition-case err
+        (server-start)
+      (file-error
+       (message "Could not start Emacs server: %s" (error-message-string err))))))
 
 ;; Grep
 (use-package wgrep
@@ -380,7 +389,7 @@
         ibuffer-default-sorting-mode 'recency
         ibuffer-human-readable-size t)
 
-  :bind (("C-x C-b" . ibuffer)
+  :bind (("C-x C-M-b" . ibuffer)
          :map ibuffer-mode-map
          ("g" . ibuffer-update)
          ("/" . ibuffer-filter-by-mode)
@@ -701,7 +710,7 @@
 ;; Docker
 (use-package docker
   :ensure t
-  :bind ("C-c D" . docker))
+  :bind ("C-c C-d" . docker))
 
 ;; AI
 (use-package copilot
@@ -784,7 +793,10 @@
   :hook (dired-mode . (lambda () (display-line-numbers-mode -1)))
   :custom
   (dirvish-attributes '(vc-state subtree-state collapse git-msg file-size file-time))
-  (dired-listing-switches "-alh --group-directories-first")
+  (dired-listing-switches
+   (if (eq system-type 'darwin)
+       "-alh"
+     "-alh --group-directories-first"))
   :config (dirvish-side-follow-mode)
   :bind (:map dirvish-mode-map
               ("TAB" . dirvish-subtree-toggle)
@@ -855,7 +867,10 @@
   (add-hook 'org-agenda-finalize-hook #'org-modern-agenda))
 
 (use-package org
-  :ensure nil                     ; Built into Emacs
+  :ensure nil
+  :preface
+  (defun my/org-confirm-babel-evaluate (lang _body)
+    (not (member lang '("emacs-lisp"))))
   :mode ("\\.org\\'" . org-mode)
   :hook
   ((org-mode . visual-line-mode)
@@ -871,7 +886,7 @@
   (org-src-fontify-natively t)
   (org-src-tab-acts-natively t)
   (org-edit-src-content-indentation 0)
-  (org-confirm-babel-evaluate nil)
+  (org-confirm-babel-evaluate #'my/org-confirm-babel-evaluate)
 
   (org-startup-with-inline-images t)
   (org-startup-with-latex-preview t)
@@ -909,7 +924,7 @@
     json-ts-mode)
    . eglot-ensure)
   :custom
-  (eglot-events-buffer-size 2000)
+  (eglot-events-buffer-size 0)
   :config
   (add-to-list
    'eglot-server-programs
@@ -982,3 +997,41 @@
 (use-package markdown-ts-mode
   :ensure t
   :defer t)
+
+;; RSS
+
+(use-package elfeed
+  :ensure t
+  :bind ("C-c f" . elfeed)
+  :custom
+  (elfeed-feeds
+   '(
+     ;; Emacs
+     ("https://emacs.stackexchange.com/feeds" emacs q-and-a)
+     ("https://protesilaos.com/codelog.xml" emacs linux)
+     ("https://irreal.org/blog/?feed=rss2" emacs)
+     ("https://sachachua.com/blog/feed/" emacs org)
+
+     ;; Developer experience / platform engineering
+     ("https://newsletter.pragmaticengineer.com/feed" dx management)
+     ("https://platformweekly.com/feed" dx platform)
+     ("https://platformengineering.org/blog/rss.xml" dx platform)
+     ("https://cloud.google.com/blog/products/devops-sre/rss" dora devops)
+     ("https://humanitec.com/blog/rss.xml" dx platform)
+     ("https://leaddev.com/rss.xml" dx management)
+     ("https://martinfowler.com/feed.atom" architecture)
+
+     ;; LLMs / AI research
+     ("https://openai.com/news/rss.xml" ai openai llm)
+     ("https://huggingface.co/blog/feed.xml" ai huggingface llm ml)
+     ("https://simonwillison.net/atom/everything/" ai llm tools)
+     ("https://rss.arxiv.org/rss/cs.CL" ai research nlp llm)
+     ("https://hnrss.org/newest?q=LLM+OR+language+model+OR+agent+OR+inference"
+      ai llm news)
+
+     ;; Programming / systems
+     ("https://news.ycombinator.com/rss" programming news)
+     ("https://lobste.rs/rss" programming systems)
+     ("https://jvns.ca/atom.xml" programming linux systems)
+     ("https://danluu.com/atom.xml" programming systems longform)
+     ("https://lwn.net/headlines/rss" linux kernel opensource))))
