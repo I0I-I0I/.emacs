@@ -36,6 +36,8 @@
         (unless (string-match-p (regexp-quote path) current)
           (setenv "PATH" (concat path path-separator current)))))))
 
+(my/add-to-path "~/.emacs.d/mason/bin")
+
 ;;; windows specific
 (when (eq system-type 'windows-nt)
   (my/add-to-path "C:/Program Files/Git/usr/bin")
@@ -257,8 +259,8 @@
   :custom
   (fontaine-presets
    '((maple-mono
-      :default-family "Maple Mono"
-      :default-height 140
+      :default-family "Maple Mono NF CN"
+      :default-height 170
       :line-spacing 1)
      (cascadia
       :default-family "Cascadia Code"
@@ -607,12 +609,16 @@
 
 ;; Treesitter
 (setq treesit-language-source-alist
-      '((elisp "https://github.com/Wilfred/tree-sitter-elisp")))
+      '((elisp "https://github.com/Wilfred/tree-sitter-elisp")
+        (svelte "https://github.com/tree-sitter-grammars/tree-sitter-svelte")
+        (javascript "https://github.com/tree-sitter/tree-sitter-javascript")
+        (typescript "https://github.com/tree-sitter/tree-sitter-typescript")
+        (css "https://github.com/tree-sitter/tree-sitter-css")
+        (jsdoc "https://github.com/tree-sitter/tree-sitter-jsdoc")))
 
 (use-package treesit-auto
-  :ensure t
   :custom
-  (treesit-auto-install t)
+  (treesit-auto-install 'prompt)
   :config
   (treesit-auto-add-to-auto-mode-alist 'all)
   (global-treesit-auto-mode))
@@ -870,9 +876,10 @@
   (org-startup-with-inline-images t)
   (org-startup-with-latex-preview t)
 
-  (org-preview-latex-default-process 'dvipng)
+  ; (org-preview-latex-default-process 'dvipng)
+  (org-preview-latex-default-process 'dvisvgm)
   (org-format-latex-options
-      (plist-put org-format-latex-options :scale 1.6))
+   (plist-put org-format-latex-options :scale 1.6))
 
   (org-log-done 'time)
   :config
@@ -884,60 +891,79 @@
 
 ;; LSP
 
-;; (use-package mason
-;;   :ensure t
-;;   :demand t
-;;   :config
-;;   (mason-setup))
-
-;; (use-package lsp-mode
-;;   :ensure t
-;;   :init
-;;   (use-package flymake
-;;     :ensure t)
-
-;;   :custom
-;;   (lsp-keymap-prefix "C-c l")
-
-;;   :hook
-;;   (((python-ts-mode typescript-ts-mode javascript-mode) . lsp-deferred)
-;;    (lsp-mode . lsp-enable-which-key-integration))
-
-;;   :commands (lsp lsp-deferred)
-
-;;   :config
-;;   (add-hook
-;;    'python-mode-hook
-;;    (lambda ()
-;;      (add-hook 'flymake-diagnostic-functions
-;;                #'flymake-ruff-load
-;;                nil t))))
+(use-package mason
+  :ensure t
+  :demand t
+  :config
+  (mason-setup))
 
 (use-package eglot
   :ensure nil
+  :defer t
   :hook
   ((python-ts-mode
-    python-mode
     js-ts-mode
     typescript-ts-mode
     tsx-ts-mode
-    svelte-mode)
-   . eglot-ensure))
+    svelte-ts-mode
+    json-ts-mode)
+   . eglot-ensure)
+  :custom
+  (eglot-events-buffer-size 2000)
+  :config
+  (add-to-list
+   'eglot-server-programs
+   `(svelte-ts-mode
+     . ,(eglot-alternatives
+         '(
+           ("rass" "--" "svelteserver" "--stdio" "--" "oxlint" "--lsp")
+           ("svelteserver" "--stdio")
+           ))))
+
+  (add-to-list
+   'eglot-server-programs
+   `((typescript-ts-mode tsx-ts-mode js-ts-mode)
+     . ,(eglot-alternatives
+         '(
+           ("rass" "--" "typescript-language-server" "--stdio" "--" "oxlint" "--lsp")
+           ("typescript-language-server" "--stdio")
+           ))))
+
+  (add-to-list
+   'eglot-server-programs
+   `(python-ts-mode
+     . ,(eglot-alternatives
+         '(
+           ("rass" "--" "ty" "server" "--" "ruff" "server")
+           ("rass" "--" "basedpyright-langserver" "--stdio" "--" "ruff" "server")
+           ("ty" "server")
+           ("basedpyright-langserver" "--stdio")
+           ))))
+
+  :bind
+  ("C-c l a" . eglot-code-actions)
+  ("C-c l r" . eglot-rename)
+  ("C-c l o" . eglot-code-action-organize-imports)
+  ("C-c l f" . eglot-format-buffer)
+  ("C-c l i" . eglot-find-implementation)
+  ("C-c l t" . eglot-find-typeDefinition)
+  ("C-c l e" . eglot-events-buffer)
+  ("C-c l s" . eglot-shutdown)
+  ("C-c l S" . eglot)
+  ("C-c l =" . eglot-reconnect)
+  ("C-c l x" . eglot-code-action-quickfix)
+  ("M-N" . flymake-goto-next-error)
+  ("M-P" . flymake-goto-prev-error)
+  ("C-c l d" . flymake-show-buffer-diagnostics)
+  ("C-c l D" . flymake-show-project-diagnostics)
+  ("C-c l ?" . flymake-show-diagnostic))
 
 (use-package svelte-ts-mode
   :vc (:url "https://github.com/leafOfTree/svelte-ts-mode"
             :rev :newest
             :branch "main")
-  :after eglot
-  :ensure t)
-
-(use-package eglot-python-preset
   :ensure t
-  :after eglot)
-
-(use-package eglot-typescript-preset
-  :ensure t
-  :after eglot)
+  :mode "\\.svelte\\'")
 
 (use-package markdown-ts-mode
   :ensure t
