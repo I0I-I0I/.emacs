@@ -1,81 +1,150 @@
 * Emacs config
 ** Quick start
 
-1. Clone this repo into =~/.emacs.d= (or =%APPDATA%/.emacs.d= on Windows).
-2. Start Emacs once to let packages install.
-3. Run =M-x eaf-install= if you use EAF.
-4. Set font =M-x customize-face RET default RET=
+Install:
+
+- git
+- [[https://nodejs.org/en/download][npm]]
+- [[https://www.python.org/downloads/][python]] and [[https://docs.astral.sh/uv/getting-started/installation/][uv]]
+- [[https://github.com/BurntSushi/ripgrep#installation][ripgrep]]
+- [[https://github.com/joaotavora/rassumfrassum][rassumfrassum]]
+
+Clone this repo into =~/.emacs.d= (or =%APPDATA%/.emacs.d= on Windows).
 
 ** Installation
 
 This config assumes Emacs 30+ (built-in tree-sitter).
 
-*** Linux (build from source)
+*** Linux
+**** Pre-requirements
+***** Arch
 
 #+begin_src bash
-  git clone https://git.savannah.gnu.org/git/emacs.git
-  cd emacs
-  ./autogen.sh
-  ./configure --prefix=/usr/local --with-x --with-x-toolkit=gtk3 --without-pgtk --with-native-compilation --with-tree-sitter --with-modules --with-cairo --with-imagemagick --with-xft
-  make -j$(nproc)
-  sudo make install
+sudo pacman -S --needed base-devel git
+
+sudo pacman -S --needed \
+     tree-sitter \
+     gtk3 \
+     cairo \
+     harfbuzz \
+     jansson \
+     sqlite \
+     libxml2 \
+     gnutls \
+     giflib \
+     libpng \
+     libjpeg-turbo \
+     libtiff \
+     librsvg \
+     libwebp \
+     zstd \
+     imagemagick \
+     mailutils \
+     libgccjit
 #+end_src
 
-*** Windows (Chocolatey)
+***** Ubuntu/Debian
 
 #+begin_src bash
-  choco install emacs
+sudo apt update
 #+end_src
 
-** Requirements
+#+begin_src bash
+sudo apt install \
+     build-essential \
+     autoconf \
+     automake \
+     texinfo \
+     libgccjit-14-dev \
+     libtree-sitter-dev \
+     libgtk-3-dev \
+     libcairo2-dev \
+     libharfbuzz-dev \
+     libjansson-dev \
+     libsqlite3-dev \
+     libxml2-dev \
+     libgnutls28-dev \
+     libpng-dev \
+     libjpeg-dev \
+     libgif-dev \
+     libtiff-dev \
+     librsvg2-dev \
+     libwebp-dev \
+     libzstd-dev \
+     libmagickwand-dev \
+     mailutils
+#+end_src
+
+**** Build
+
+#+begin_src bash
+git clone https://git.savannah.gnu.org/git/emacs.git
+cd emacs
+./autogen.sh
+
+./configure\
+    --prefix=/usr/local \
+    --with-native-compilation=aot \
+    --with-pgtk \
+    --with-tree-sitter \
+    --with-cairo \
+    --with-harfbuzz \
+    --with-sqlite3 \
+    --with-xml2 \
+    --with-gnutls \
+    --with-modules \
+    --with-gif \
+    --with-png \
+    --with-jpeg \
+    --with-tiff \
+    --with-rsvg \
+    --with-webp \
+    --with-mailutils
+
+make -j$(nproc)
+sudo make install
+#+end_src
+
 *** Windows
-
+**** Chocolatey
 #+begin_src bash
-  choco install gnuwin
+choco install gnuwin
 #+end_src
 
-*** Shell tools
-
-- git
-- [[https://bun.com/docs/installation][bun]] and [[https://nodejs.org/en/download][npm]]
-- [[https://www.python.org/downloads/][python]] and [[https://docs.astral.sh/uv/getting-started/installation/][uv]]
-- [[https://github.com/BurntSushi/ripgrep#installation][ripgrep]]
-
-*** Optional
-
-- mpv/vlc (video player)
-- [[https://www.libvips.org/install.html][libvips]] (image preview)
-
-** LSP (lsp-bridge)
-
-*** Python deps
-
 #+begin_src bash
-  pip3 install epc orjson sexpdata six setuptools paramiko rapidfuzz watchdog packaging
+choco install emacs
 #+end_src
 
-*** Language server mapping
+**** Install from site
 
-- ts/js: =tsls_oxlint_oxfmt=
-- py: =ty_ruff=
+Go to [[https://alpha.gnu.org/pub/gnu/emacs/pretest/windows/emacs-31/]] and download the 'emacs-31.0.90.zip', then run 'bin/runemacs.exe'
 
-*** Install tools
+***** Disable the Smart App Control:
+
+Go to:
+
+Settings → Privacy & security → Windows Security → App & browser control → Smart App Control
+
+*** Fresh build
 
 #+begin_src bash
-  bun install -g typescript-language-server typescript oxlint oxfmt vscode-langservers-extracted
+make clean
+#+end_src
 
-  uv tool install ruff ty
+or
+
+#+begin_src bash
+git clean -xfd
 #+end_src
 
 ** Windows notes
 
 - Git is expected at =C:/Program Files/Git/usr/bin= (added to PATH in =init.el=).
-- vips is expected at C:/Program Files/vips/bin
 - =bash-completion= uses WSL when available.
 
 - Set ctrl to caps
   #+begin_src pwsh
-    $hexified = "00,00,00,00,00,00,00,00,02,00,00,00,1d,00,3a,00,00,00,00,00".Split(',') | % { "0x$_"};
-    $kbLayout = 'HKLM:\System\CurrentControlSet\Control\Keyboard Layout';
-    New-ItemProperty -Path $kbLayout -Name "Scancode Map" -PropertyType Binary -Value ([byte[]]$hexified);
+  $hexified = "00,00,00,00,00,00,00,00,02,00,00,00,1d,00,3a,00,00,00,00,00".Split(',') | % { "0x$_"};
+  $kbLayout = 'HKLM:\System\CurrentControlSet\Control\Keyboard Layout';
+  New-ItemProperty -Path $kbLayout -Name "Scancode Map" -PropertyType Binary -Value ([byte[]]$hexified);
   #+end_src
