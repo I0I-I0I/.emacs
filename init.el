@@ -115,22 +115,15 @@
   (tool-bar-mode -1)
   (scroll-bar-mode -1)
 
-  ;; (treesit-auto-install-grammar 'always)
-  ;; (treesit-enabled-modes t)
+  (setq treesit-auto-install-grammar 'ask
+        treesit-enabled-modes t)
 
-  ;; (delete-pair-push-mark t)                    ; EMACS-31: pushes a mark after
-  ;;                                       ; delete-pair so C-x C-x selects what was inside
-  ;; (ibuffer-human-readable-size t)              ; EMACS-31: KB/MB instead of raw byte counts
-  ;; (ielm-history-file-name ...)                 ; EMACS-31: IELM input history is finally persisted
-  ;; (kill-region-dwim 'emacs-word)               ; EMACS-31: C-w with no region kills a word
-  ;; (native-comp-async-on-battery-power nil)     ; EMACS-31: stop native-comp jobs on battery
-  ;; (view-lossage-auto-refresh t)                ; EMACS-31: live-updating C-h l, great for teaching/debugging
-  ;; (display-fill-column-indicator-warning nil)  ; EMACS-31
-  ;; (dired-hide-details-hide-absolute-location t); EMACS-31: hide the absolute dir path in dired-hide-details-mode
-  ;; (world-clock-sort-order "%FT%T")             ; EMACS-31: sort the world clock sanely
-  ;; (zone-all-frames t)                          ; EMACS-31
-  ;; (zone-all-windows-in-frame t)                ; EMACS-31
-  ;; (uniquify-after-kill-buffer-flag t)
+  (setq delete-pair-push-mark t
+        kill-region-dwim 'emacs-word
+        native-comp-async-on-battery-power nil
+        view-lossage-auto-refresh t
+        display-fill-column-indicator-warning nil
+        dired-hide-details-hide-absolute-location t)
 
   (add-hook 'prog-mode-hook
             (lambda ()
@@ -138,6 +131,7 @@
   (save-place-mode 1)
   (global-hl-line-mode 1)
   (repeat-mode 1)
+  (mode-line-invisible-mode t)
 
   (global-auto-revert-mode 1)
   (setq auto-revert-interval 1)
@@ -215,7 +209,8 @@
    ("M-<down>" . move-text-down)
    ("M-<up>" . move-text-up)
    ("M-S-<right>" . org-increase-number-at-point)
-   ("M-S-<left>" . org-decrease-number-at-point)))
+   ("M-S-<left>" . org-decrease-number-at-point)
+   ("C-x m" . mode-line-invisible-mode)))
 
 (use-package crux
   :ensure t
@@ -280,6 +275,46 @@
   :config
   (fontaine-mode t)
   (fontaine-set-preset 'maple-mono))
+
+;; Mode line
+(defvar my/mode-line-extra-format nil
+  "Extra mode line segments appended after the core mode line.")
+
+(defun my/mode-line-buffer-name ()
+  "Return the project-relative file name, or the buffer name for non-file buffers."
+  (if buffer-file-name
+      (if-let* ((project (unless (file-remote-p buffer-file-name)
+                           (project-current nil))))
+          (file-relative-name buffer-file-name (project-root project))
+        (abbreviate-file-name buffer-file-name))
+    (buffer-name)))
+
+(defun my/mode-line-perspective ()
+  "Return the current Perspective name for the mode line."
+  (when (and (bound-and-true-p persp-mode)
+             (fboundp 'persp-current-name))
+    (let ((name (persp-current-name)))
+      (unless (string= name "")
+        (format "[%s] " name)))))
+
+(defun my/mode-line-vc ()
+  "Return compact VC branch info."
+  (when vc-mode
+    (format " %s" (string-trim vc-mode))))
+
+(setq-default
+ mode-line-format
+ '("%e "
+   (:eval (my/mode-line-perspective))
+   "%* "
+   (:eval (my/mode-line-buffer-name))
+   "  ("
+   mode-name
+   ")"
+   (:eval (my/mode-line-vc))
+   mode-line-misc-info
+   my/mode-line-extra-format
+   mode-line-end-spaces))
 
 ;;; Which key
 (use-package which-key
@@ -690,19 +725,11 @@ With prefix argument NEW, always create a new eshell buffer."
 
 ;; Treesitter
 (setq treesit-language-source-alist
-      '((elisp "https://github.com/Wilfred/tree-sitter-elisp")
-        (svelte "https://github.com/tree-sitter-grammars/tree-sitter-svelte")
-        (javascript "https://github.com/tree-sitter/tree-sitter-javascript")
-        (typescript "https://github.com/tree-sitter/tree-sitter-typescript")
-        (css "https://github.com/tree-sitter/tree-sitter-css")
-        (jsdoc "https://github.com/tree-sitter/tree-sitter-jsdoc")))
+      '((elisp "https://github.com/Wilfred/tree-sitter-elisp")))
 
-(use-package treesit-auto
-  :custom
-  (treesit-auto-install 'prompt)
-  :config
-  (treesit-auto-add-to-auto-mode-alist 'all)
-  (global-treesit-auto-mode))
+(when (fboundp 'treesit-install-language-grammar)
+  (unless (treesit-language-available-p 'svelte)
+    (treesit-install-language-grammar 'svelte)))
 
 ;; Selection
 (use-package expreg
@@ -905,6 +932,7 @@ With prefix argument NEW, always create a new eshell buffer."
        (persp-state-load persp-state-default-file))))
 
   :custom
+  (persp-show-modestring nil)
   (persp-mode-prefix-key (kbd "C-c p"))
   (persp-state-default-file
    (expand-file-name "perspective-session" user-emacs-directory))
@@ -1059,8 +1087,8 @@ With prefix argument NEW, always create a new eshell buffer."
   ("C-c l S" . eglot)
   ("C-c l =" . eglot-reconnect)
   ("C-c l x" . eglot-code-action-quickfix)
-  ("M-N" . flymake-goto-next-error)
-  ("M-P" . flymake-goto-prev-error)
+  ("C-c C-n" . flymake-goto-next-error)
+  ("C-c C-p" . flymake-goto-prev-error)
   ("C-c l d" . flymake-show-buffer-diagnostics)
   ("C-c l D" . flymake-show-project-diagnostics)
   ("C-c l ?" . flymake-show-diagnostic))
