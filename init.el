@@ -78,10 +78,18 @@
   :init
   (use-package display-line-numbers
     :ensure nil
-    :hook ((prog-mode . display-line-numbers-mode)
-           (text-mode . (lambda () (display-line-numbers-mode -1))))
     :config
-    (setq display-line-numbers-type 'relative))
+    (defun my/display-line-numbers--turn-on-unless-text (orig &rest args)
+      "Turn on line numbers only outside `text-mode' buffers."
+      (unless (derived-mode-p 'text-mode)
+        (apply orig args)))
+
+    (advice-add 'display-line-numbers--turn-on
+                :around #'my/display-line-numbers--turn-on-unless-text)
+    (setq display-line-numbers-type 'relative)
+    (global-display-line-numbers-mode)
+    :bind
+    ("C-c L" . global-display-line-numbers-mode))
 
   (setq gc-cons-threshold (* 64 1024 1024)
         gc-cons-percentage 0.1
@@ -131,7 +139,11 @@
   (save-place-mode 1)
   (global-hl-line-mode 1)
   (repeat-mode 1)
-  (mode-line-invisible-mode t)
+
+  (define-globalized-minor-mode global-mode-line-invisible-mode
+    mode-line-invisible-mode
+    (lambda () (mode-line-invisible-mode 1)))
+  (global-mode-line-invisible-mode 1)
 
   (global-auto-revert-mode 1)
   (setq auto-revert-interval 1)
@@ -194,6 +206,27 @@
   (defun move-text-down (arg) (interactive "*p") (move-text-internal arg))
   (defun move-text-up   (arg) (interactive "*p") (move-text-internal (- arg)))
 
+  ;; Vim-like C-r C-w for minibuffer prompts.
+  (defun my-minibuffer-insert-symbol-at-point ()
+    "Insert the symbol at point from the buffer that opened the minibuffer."
+    (interactive)
+    (let* ((window (minibuffer-selected-window))
+           (text (when (window-live-p window)
+                   (with-current-buffer (window-buffer window)
+                     (save-excursion
+                       (goto-char (window-point window))
+                       (or (thing-at-point 'symbol t)
+                           (thing-at-point 'word t)))))))
+      (unless text
+        (user-error "No symbol at point"))
+      (insert (substring-no-properties text))))
+
+  (defun my/copy-current-line-number ()
+    "Copy the current line number to the kill ring."
+    (interactive)
+    (kill-new (number-to-string (line-number-at-pos)))
+    (message "Copied line number: %s" (current-kill 0)))
+
   :bind
   (("C-v" . scroll-half-page-up)
    ("M-v" . scroll-half-page-down)
@@ -210,7 +243,16 @@
    ("M-<up>" . move-text-up)
    ("M-S-<right>" . org-increase-number-at-point)
    ("M-S-<left>" . org-decrease-number-at-point)
-   ("C-x m" . mode-line-invisible-mode)))
+   ("C-x m" . global-mode-line-invisible-mode)
+   ("C-x L" . my/copy-current-line-number)
+   :map minibuffer-local-map
+   ("M-l" . my-minibuffer-insert-symbol-at-point)
+   :map minibuffer-local-ns-map
+   ("M-l" . my-minibuffer-insert-symbol-at-point)
+   :map minibuffer-local-completion-map
+   ("M-l" . my-minibuffer-insert-symbol-at-point)
+   :map minibuffer-local-must-match-map
+   ("M-l" . my-minibuffer-insert-symbol-at-point)))
 
 (use-package crux
   :ensure t
@@ -804,7 +846,7 @@ With prefix argument NEW, always create a new eshell buffer."
 
 (use-package emmet-mode
   :ensure t
-  :hook ((html-mode css-mode sgml-mode web-mode js-jsx-mode tsx-ts-mode) . emmet-mode))
+  :hook ((html-mode css-mode sgml-mode web-mode js-jsx-mode tsx-ts-mode svelte-ts-mode) . emmet-mode))
 
 ;; Docker
 (use-package docker
@@ -819,29 +861,40 @@ With prefix argument NEW, always create a new eshell buffer."
          ("<tab>" . copilot-accept-completion)
          ("TAB" . copilot-accept-completion)))
 
+(use-package pi-coding-agent
+  :ensure t
+  :bind
+  ("C-c a" . pi-coding-agent)
+  (:map pi-coding-agent-chat-mode-map
+        ("C-c a" . pi-coding-agent-toggle))
+  (:map pi-coding-agent-input-mode-map
+        ("C-c a" . pi-coding-agent-toggle)))
+
 ;; (use-package codeium
 ;;   :vc (:url "https://github.com/Exafunction/codeium.el"
 ;;             :rev :newest)
 ;;   :init
 ;;   (add-to-list 'completion-at-point-functions #'codeium-completion-at-point))
 
-(use-package agent-shell
-  :ensure t
-  :config
-  ;; (setq agent-shell-openai-authentication
-  ;;       (agent-shell-openai-make-authentication :login t))
-  (setq agent-shell-google-authentication
-        (agent-shell-google-make-authentication :login t))
-  :bind (("C-c a" . agent-shell)
-         :map agent-shell-mode-map
-         ("RET" . newline)
-         ("C-c C-c" . shell-maker-submit)
-         ("C-c C-k" . agent-shell-interrupt)))
+;; (use-package agent-shell
+;;   :ensure t
+;;   :config
+;;   ;; (setq agent-shell-openai-authentication
+;;   ;;       (agent-shell-openai-make-authentication :login t))
+;;   (setq agent-shell-google-authentication
+;;         (agent-shell-google-make-authentication :login t))
+;;   :bind (("C-c a" . agent-shell)
+;;          :map agent-shell-mode-map
+;;          ("RET" . newline)
+;;          ("C-c C-c" . shell-maker-submit)
+;;          ("C-c C-k" . agent-shell-interrupt)))
 
 ;; Zen mode
 (use-package sublimity
   :ensure t
-  :config (require 'sublimity-attractive)
+  :config
+  (require 'sublimity-attractive)
+  (sublimity-mode)
   :bind (("C-c z" . sublimity-mode)))
 
 ;; Dired
@@ -963,8 +1016,7 @@ With prefix argument NEW, always create a new eshell buffer."
 
   :bind
   (:map org-mode-map
-        ("C-c C-y" . org-download-clipboard)
-        ("C-c C-d" . org-download-delete)))
+        ("C-c C-y" . org-download-clipboard)))
 
 (use-package org-fragtog
   :ensure t
@@ -988,8 +1040,29 @@ With prefix argument NEW, always create a new eshell buffer."
 (use-package org
   :ensure nil
   :preface
+  (define-prefix-command 'my/org-prefix-map)
+
   (defun my/org-confirm-babel-evaluate (lang _body)
     (not (member lang '("emacs-lisp"))))
+
+  (defun my/org-find-note ()
+    "Open `find-file' from `org-directory' to search or create notes."
+    (interactive)
+    (let ((default-directory (file-name-as-directory org-directory)))
+      (call-interactively #'find-file)))
+  :init
+  (global-set-key (kbd "C-z") my/org-prefix-map)
+
+  (use-package calendar
+    :ensure nil
+    :custom
+    (calendar-week-start-day 1)
+    (calendar-mark-diary-entries-flag t)
+    (calendar-mark-holidays-flag t)
+    :bind
+    (:map my/org-prefix-map
+          ("k" . calendar)))
+
   :mode ("\\.org\\'" . org-mode)
   :hook
   ((org-mode . visual-line-mode)
@@ -997,6 +1070,11 @@ With prefix argument NEW, always create a new eshell buffer."
    (org-mode . org-indent-mode))
   :custom
   ;; Editing
+  (org-log-done 'time)
+  (org-log-into-drawer t)
+  (org-insert-heading-respect-content t)
+  (org-M-RET-may-split-line '((default . nil)))
+
   (org-startup-indented t)
   (org-hide-emphasis-markers t)
   (org-pretty-entities t)
@@ -1007,22 +1085,52 @@ With prefix argument NEW, always create a new eshell buffer."
   (org-edit-src-content-indentation 0)
   (org-confirm-babel-evaluate #'my/org-confirm-babel-evaluate)
   (org-startup-with-inline-images t)
-
-  (org-startup-with-inline-images t)
   (org-startup-with-latex-preview t)
+
+  (org-src-preserve-indentation t)
+  (org-src-window-setup 'current-window)
+  (org-confirm-babel-evaluate #'my/org-confirm-babel-evaluate)
+
+  (org-directory (expand-file-name "~/Dropbox/Apps/remotely-save/notes/"))
+  (org-agenda-files (list org-directory))
+  (org-agenda-span 7)
+  (org-deadline-warning-days 7)
+  (org-agenda-start-with-log-mode t)
+
+  (org-agenda-custom-commands
+   '(("d" "Daily Agenda"
+      ((agenda "" ((org-agenda-span 'day)))))))
+
+  (org-default-notes-file (expand-file-name "inbox.org" org-directory))
+  (org-todo-keywords
+   '((sequence "TODO(t)" "WAIT(w@)" "|" "DONE(d!)" "CANCELLED(c@)")))
+  (org-refile-targets '((org-agenda-files :maxlevel . 3)))
+  (org-outline-path-complete-in-steps nil)
+  (org-refile-use-outline-path 'file)
+  (org-capture-templates
+   '(("t" "Task" entry
+      (file "inbox.org")
+      "* TODO %?\n")))
 
                                         ; (org-preview-latex-default-process 'dvipng)
   (org-preview-latex-default-process 'dvisvgm)
   (org-format-latex-options
    (plist-put org-format-latex-options :scale 1.6))
 
-  (org-log-done 'time)
   :config
   (org-babel-do-load-languages
    'org-babel-load-languages
    '((emacs-lisp . t)
      (python . t)
-     (shell . t))))
+     (shell . t)))
+  :bind
+  (:map my/org-prefix-map
+        ("a" . org-agenda)
+        ("c" . org-capture)
+        ("n" . my/org-find-note)
+        ("T" . org-todo-list)
+        :map org-mode-map
+        ("C-c C-d" . org-deadline)))
 
 ;; LSP
 
@@ -1112,6 +1220,9 @@ With prefix argument NEW, always create a new eshell buffer."
             :rev :newest
             :branch "main")
   :ensure t
+  :bind (:map svelte-ts-mode-map
+              ("C-c C-n" . flymake-goto-next-error)
+              ("C-c C-p" . flymake-goto-prev-error))
   :mode "\\.svelte\\'")
 
 (use-package markdown-ts-mode
@@ -1155,3 +1266,9 @@ With prefix argument NEW, always create a new eshell buffer."
      ("https://jvns.ca/atom.xml" programming linux systems)
      ("https://danluu.com/atom.xml" programming systems longform)
      ("https://lwn.net/headlines/rss" linux kernel opensource))))
+
+(use-package remoto
+  :vc (:url "https://github.com/agzam/remoto.el"
+            :rev :newest
+            :branch "main")
+  :demand t)
