@@ -89,7 +89,7 @@
     (setq display-line-numbers-type 'relative)
     (global-display-line-numbers-mode)
     :bind
-    ("C-c L" . global-display-line-numbers-mode))
+    ("C-x L" . global-display-line-numbers-mode))
 
   (setq gc-cons-threshold (* 64 1024 1024)
         gc-cons-percentage 0.1
@@ -107,7 +107,7 @@
 
   (run-with-idle-timer 10 t #'garbage-collect)
 
-  (setq-default fill-column 120
+  (setq-default fill-column 1000
                 indent-tabs-mode nil
                 tab-width 4
                 c-basic-offset 4
@@ -122,9 +122,6 @@
   (menu-bar-mode -1)
   (tool-bar-mode -1)
   (scroll-bar-mode -1)
-
-  (setq treesit-auto-install-grammar 'ask
-        treesit-enabled-modes t)
 
   (setq delete-pair-push-mark t
         kill-region-dwim 'emacs-word
@@ -244,7 +241,8 @@
    ("M-S-<right>" . org-increase-number-at-point)
    ("M-S-<left>" . org-decrease-number-at-point)
    ("C-x m" . global-mode-line-invisible-mode)
-   ("C-x L" . my/copy-current-line-number)
+   ("C-c L" . my/copy-current-line-number)
+   ("C-x F" . toggle-frame-fullscreen)
    :map minibuffer-local-map
    ("M-l" . my-minibuffer-insert-symbol-at-point)
    :map minibuffer-local-ns-map
@@ -767,11 +765,15 @@ With prefix argument NEW, always create a new eshell buffer."
 
 ;; Treesitter
 (setq treesit-language-source-alist
-      '((elisp "https://github.com/Wilfred/tree-sitter-elisp")))
+      '((elisp "https://github.com/Wilfred/tree-sitter-elisp")
+        (svelte "https://github.com/tree-sitter-grammars/tree-sitter-svelte")))
 
 (when (fboundp 'treesit-install-language-grammar)
   (unless (treesit-language-available-p 'svelte)
     (treesit-install-language-grammar 'svelte)))
+
+(setopt treesit-enabled-modes t
+        treesit-auto-install-grammar 'always)
 
 ;; Selection
 (use-package expreg
@@ -1154,6 +1156,22 @@ With prefix argument NEW, always create a new eshell buffer."
   :custom
   (eglot-events-buffer-size 0)
   :config
+  (setq-default eglot-workspace-configuration
+                '(:ty (:diagnosticMode "workspace")
+                      ;; vtsls asks Eglot for section "", so it needs a whole
+                      ;; VS-Code-style configuration tree here rather than only
+                      ;; :typescript/:javascript sections.
+                      "" (:typescript (:tsserver (:experimental (:enableProjectDiagnostics t)))
+                                      :javascript (:tsserver (:experimental (:enableProjectDiagnostics t))))
+                      :typescript (:tsserver (:experimental (:enableProjectDiagnostics t)))
+                      :javascript (:tsserver (:experimental (:enableProjectDiagnostics t)))))
+
+  (cl-defmethod eglot-client-capabilities :around ((server eglot-lsp-server))
+    "Advertise generic workspace diagnostic support to LSP servers."
+    (let ((capabilities (cl-call-next-method)))
+      (plist-put (plist-get capabilities :workspace)
+                 :diagnostics '(:refreshSupport t))
+      capabilities))
   (add-to-list
    'eglot-server-programs
    `(svelte-ts-mode
@@ -1168,7 +1186,7 @@ With prefix argument NEW, always create a new eshell buffer."
    `((typescript-ts-mode tsx-ts-mode js-ts-mode)
      . ,(eglot-alternatives
          '(
-           ("rass" "--" "typescript-language-server" "--stdio" "--" "oxlint" "--lsp")
+           ("rass" "--" "vtsls" "--stdio" "--" "oxlint" "--lsp")
            ("typescript-language-server" "--stdio")
            ))))
 
@@ -1182,6 +1200,105 @@ With prefix argument NEW, always create a new eshell buffer."
            ("ty" "server")
            ("basedpyright-langserver" "--stdio")
            ))))
+
+  (defun my/eglot-workspace-diagnostics--supports-lsp-p ()
+    "Return non-nil if the current Eglot server advertises workspace diagnostics."
+    (eglot-server-capable :diagnosticProvider :workspaceDiagnostics))
+
+  (defun my/eglot-workspace-diagnostics--list-only-p (entry server)
+    "Return non-nil if ENTRY is a list-only diagnostic for SERVER."
+    (let ((file (car entry)))
+      (and (stringp file)
+           (> (length file) 0)
+           (eq (get-text-property 0 'eglot--server file) server))))
+
+  (defun my/eglot-workspace-diagnostics--has-list-only-p (server)
+    "Return non-nil if Flymake already has project diagnostics for SERVER."
+    (seq-some
+     (lambda (entry)
+       (my/eglot-workspace-diagnostics--list-only-p entry server))
+     flymake-list-only-diagnostics))
+
+  (defun my/eglot-workspace-diagnostics--clear (server)
+    "Clear workspace diagnostics previously stored for SERVER by this command."
+    (setq flymake-list-only-diagnostics
+          (cl-remove-if
+           (lambda (entry)
+             (let ((file (car entry)))
+               (and (my/eglot-workspace-diagnostics--list-only-p entry server)
+                    (get-text-property 0 'my/eglot-workspace-diagnostics file))))
+           flymake-list-only-diagnostics)))
+
+  (defun my/eglot-workspace-diagnostics--mark (server)
+    "Mark current list-only diagnostics for SERVER as owned by this command."
+    (setq flymake-list-only-diagnostics
+          (mapcar
+           (lambda (entry)
+             (let ((file (car entry)))
+               (when (my/eglot-workspace-diagnostics--list-only-p entry server)
+                 (put-text-property 0 (length file)
+                                    'my/eglot-workspace-diagnostics t
+                                    file))
+               entry))
+           flymake-list-only-diagnostics)))
+
+  (defun my/eglot-workspace-diagnostics--show-pushed (server)
+    "Show diagnostics that SERVER already pushed for unopened files."
+    (message "%s has pushed project diagnostics; showing Flymake project diagnostics"
+             (eglot--server-name server))
+    (flymake-show-project-diagnostics))
+
+  (defun my/eglot-workspace-diagnostics--request (server)
+    "Request workspace diagnostics from SERVER and store them in Flymake."
+    (let* ((report (eglot--request
+                    server
+                    :workspace/diagnostic
+                    '(:previousResultIds [])
+                    :timeout 60))
+           (items (append (plist-get report :items) nil))
+           (diagnostic-count 0))
+      (my/eglot-workspace-diagnostics--clear server)
+      (dolist (item items)
+        (when (equal (plist-get item :kind) "full")
+          (cl-incf diagnostic-count (length (plist-get item :items)))
+          (eglot--flymake-handle-push
+           server
+           (plist-get item :uri)
+           (plist-get item :items)
+           (plist-get item :version)
+           #'ignore)))
+      (my/eglot-workspace-diagnostics--mark server)
+      (message "%s workspace diagnostics: %d diagnostics in %d reports"
+               (eglot--server-name server) diagnostic-count (length items))
+      (flymake-show-project-diagnostics)))
+
+  (defun my/eglot-workspace-diagnostics ()
+    "Fetch or display workspace/project diagnostics for the current Eglot server.
+
+Prefer the standard LSP `workspace/diagnostic' request.  If a server does not
+advertise that capability, try the request anyway so wrappers/proxies that omit
+capabilities can still work.  When the request is unavailable but the server has
+already pushed diagnostics for unopened files, fall back to Flymake's project
+view."
+    (interactive)
+    (require 'cl-lib)
+    (require 'flymake)
+    (require 'seq)
+    (let ((server (eglot-current-server)))
+      (unless server
+        (user-error "No Eglot server in current buffer"))
+      (unless (my/eglot-workspace-diagnostics--supports-lsp-p)
+        (message "%s does not advertise workspace diagnostics; trying anyway"
+                 (eglot--server-name server)))
+      (condition-case err
+          (my/eglot-workspace-diagnostics--request server)
+        (jsonrpc-error
+         (if (my/eglot-workspace-diagnostics--has-list-only-p server)
+             (my/eglot-workspace-diagnostics--show-pushed server)
+           (user-error "%s failed workspace diagnostics: %s"
+                       (eglot--server-name server)
+                       (or (alist-get 'jsonrpc-error-message (cddr err))
+                           (error-message-string err))))))))
 
   :bind
   ("C-c l a" . eglot-code-actions)
@@ -1198,7 +1315,7 @@ With prefix argument NEW, always create a new eshell buffer."
   ("C-c C-n" . flymake-goto-next-error)
   ("C-c C-p" . flymake-goto-prev-error)
   ("C-c l d" . flymake-show-buffer-diagnostics)
-  ("C-c l D" . flymake-show-project-diagnostics)
+  ("C-c l D" . my/eglot-workspace-diagnostics)
   ("C-c l ?" . flymake-show-diagnostic))
 
 (use-package apheleia
