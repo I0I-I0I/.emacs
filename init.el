@@ -167,6 +167,11 @@
         fast-but-imprecise-scrolling t
         scroll-preserve-screen-position t)
 
+  (put 'narrow-to-region 'disabled nil)
+  (put 'narrow-to-page 'disabled nil)
+
+  (setq isearch-lazy-count t)
+
   (require 'uniquify)
   (setq uniquify-buffer-name-style 'post-forward)
 
@@ -251,6 +256,40 @@
    ("M-l" . my-minibuffer-insert-symbol-at-point)
    :map minibuffer-local-must-match-map
    ("M-l" . my-minibuffer-insert-symbol-at-point)))
+
+;; Tabs
+(use-package tab-bar
+  :ensure nil
+  :custom
+  (tab-bar-show 1)
+  (tab-bar-close-button-show nil)
+  (tab-bar-new-button-show nil)
+  :config
+  (tab-bar-mode 1)
+  :bind (:map my/override-map
+              ("C-M-<tab>" . tab-bar-switch-to-prev-tab)
+              ("C-M-o" . tab-bar-switch-to-next-tab)))
+
+(defun my/project-tab-name (prefix)
+  "Return PREFIX plus the current project/directory name."
+  (format "%s: %s"
+          prefix
+          (or (when-let* ((project (project-current nil)))
+                (file-name-nondirectory
+                 (directory-file-name (project-root project))))
+              (file-name-nondirectory
+               (directory-file-name default-directory)))))
+
+(defun my/current-tab-name ()
+  "Return the current tab-bar tab name."
+  (alist-get 'name (tab-bar--current-tab)))
+
+(defun my/switch-to-named-tab (name)
+  "Switch to tab-bar tab NAME, creating it when needed."
+  (if (member name (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs)))
+      (tab-bar-switch-to-tab name)
+    (tab-bar-new-tab)
+    (tab-bar-rename-tab name)))
 
 (use-package crux
   :ensure t
@@ -729,7 +768,54 @@ With prefix argument NEW, always create a new eshell buffer."
 (use-package magit
   :ensure t
   :commands (magit-status magit-dispatch)
-  :bind (("C-x v d" . magit-status)
+  :preface
+  (defvar my/magit-return-tab nil
+    "Tab to return to when toggling away from the magit tab.")
+
+  (defvar-local my/magit-tab-name nil
+    "Dedicated tab name for this Magit buffer.")
+
+  (defun my/magit-tab-name ()
+    "Return the dedicated Magit tab name for the current project."
+    (my/project-tab-name "magit"))
+
+  (defun my/magit-close-tab (&optional tab-name)
+    "Close the dedicated Magit TAB-NAME."
+    (let ((name (or tab-name my/magit-tab-name (my/magit-tab-name))))
+      (when (and name
+                 (> (length (tab-bar-tabs)) 1)
+                 (member name (mapcar (lambda (tab) (alist-get 'name tab))
+                                      (tab-bar-tabs))))
+        (tab-bar-close-tab-by-name name))))
+
+  (defun my/magit-status-in-tab ()
+    "Open/toggle `magit-status' in a dedicated project tab."
+    (interactive)
+    (let ((magit-tab (my/magit-tab-name))
+          (current-tab (my/current-tab-name)))
+      (if (and (string= current-tab magit-tab)
+               (derived-mode-p 'magit-mode)
+               my/magit-return-tab
+               (member my/magit-return-tab
+                       (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs))))
+          (tab-bar-switch-to-tab my/magit-return-tab)
+        (setq my/magit-return-tab current-tab)
+        (my/switch-to-named-tab magit-tab)
+        (call-interactively #'magit-status)
+        (setq-local my/magit-tab-name magit-tab))))
+
+  (defun my/magit-quit-and-close-tab ()
+    "Quit Magit and close its dedicated tab."
+    (interactive)
+    (let ((tab-name (or my/magit-tab-name (my/magit-tab-name))))
+      (quit-window t)
+      (my/magit-close-tab tab-name)))
+
+  (defun my/magit-close-tab-after-kill ()
+    "Close this buffer's dedicated Magit tab after the buffer is killed."
+    (when my/magit-tab-name
+      (run-at-time 0 nil #'my/magit-close-tab my/magit-tab-name)))
+  :bind (("C-x v d" . my/magit-status-in-tab)
          ("C-x v v" . magit-commit-create)
          ("C-x v l" . magit-log-buffer-file)
          ("C-x v L" . magit-log)
@@ -737,11 +823,19 @@ With prefix argument NEW, always create a new eshell buffer."
          ("C-x v u" . magit-revert)
          ("C-x v P" . magit-push-current)
          ("C-x v p" . magit-pull-branch)
-         ("C-x v !" . magit-dispatch))
+         ("C-x v !" . magit-dispatch)
+         :map magit-status-mode-map
+         ("q" . my/magit-quit-and-close-tab)
+         ("C-x v d" . my/magit-status-in-tab)
+         :map magit-mode-map
+         ("C-x v d" . my/magit-status-in-tab))
   :custom
   (magit-process-connection-type nil)
   (vc-handled-backends '(Git))
   :config
+  (add-hook 'magit-status-mode-hook
+            (lambda ()
+              (add-hook 'kill-buffer-hook #'my/magit-close-tab-after-kill nil t)))
   (setq magit-display-buffer-function
         #'magit-display-buffer-same-window-except-diff-v1)
   (when (eq system-type 'windows-nt)
@@ -865,12 +959,42 @@ With prefix argument NEW, always create a new eshell buffer."
 
 (use-package pi-coding-agent
   :ensure t
+  :preface
+  (defvar my/pi-coding-agent-return-tab nil
+    "Tab to return to when toggling away from the pi tab.")
+
+  (defun my/pi-coding-agent-in-tab ()
+    "Open `pi-coding-agent' in a dedicated project tab, or return from it.
+
+When invoked from the pi tab, switch back to the tab from which pi was
+opened without hiding or toggling the pi buffer."
+    (interactive)
+    (let ((pi-tab (my/project-tab-name "pi"))
+          (current-tab (my/current-tab-name)))
+      (if (and (string= current-tab pi-tab)
+               my/pi-coding-agent-return-tab
+               (member my/pi-coding-agent-return-tab
+                       (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs))))
+          (tab-bar-switch-to-tab my/pi-coding-agent-return-tab)
+        (unless (string= current-tab pi-tab)
+          (setq my/pi-coding-agent-return-tab current-tab))
+        (my/switch-to-named-tab pi-tab)
+        (call-interactively #'pi-coding-agent))))
+
+  (defun my/pi-coding-agent-return-tab ()
+    "Switch back from the pi tab without hiding the pi buffer."
+    (interactive)
+    (if (and my/pi-coding-agent-return-tab
+             (member my/pi-coding-agent-return-tab
+                     (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs))))
+        (tab-bar-switch-to-tab my/pi-coding-agent-return-tab)
+      (tab-bar-switch-to-prev-tab)))
   :bind
-  ("C-c a" . pi-coding-agent)
+  ("C-c a" . my/pi-coding-agent-in-tab)
   (:map pi-coding-agent-chat-mode-map
-        ("C-c a" . pi-coding-agent-toggle))
+        ("C-c a" . my/pi-coding-agent-return-tab))
   (:map pi-coding-agent-input-mode-map
-        ("C-c a" . pi-coding-agent-toggle)))
+        ("C-c a" . my/pi-coding-agent-return-tab)))
 
 ;; (use-package codeium
 ;;   :vc (:url "https://github.com/Exafunction/codeium.el"
@@ -892,12 +1016,34 @@ With prefix argument NEW, always create a new eshell buffer."
 ;;          ("C-c C-k" . agent-shell-interrupt)))
 
 ;; Zen mode
-(use-package sublimity
+;; (use-package sublimity
+;;   :ensure t
+;;   :config
+;;   (require 'sublimity-attractive)
+;;   (sublimity-mode)
+;;   :bind (("C-c z" . sublimity-mode)))
+
+(use-package olivetti
   :ensure t
+  :demand t
+  :bind
+  ("C-c z" . olivetti-mode)
+  :custom
+  (olivetti-body-width 120)
+  (olivetti-minimum-body-width 100)
+  :hook
+  (olivetti-mode . visual-line-mode)
   :config
-  (require 'sublimity-attractive)
-  (sublimity-mode)
-  :bind (("C-c z" . sublimity-mode)))
+  (defun my/turn-on-olivetti ()
+    (unless (or (minibufferp)
+                (derived-mode-p 'special-mode 'dired-mode))
+      (olivetti-mode 1)))
+
+  (define-globalized-minor-mode global-olivetti-mode
+    olivetti-mode
+    my/turn-on-olivetti)
+
+  (global-olivetti-mode 1))
 
 ;; Dired
 (use-package dired
@@ -1172,6 +1318,7 @@ With prefix argument NEW, always create a new eshell buffer."
       (plist-put (plist-get capabilities :workspace)
                  :diagnostics '(:refreshSupport t))
       capabilities))
+
   (add-to-list
    'eglot-server-programs
    `(svelte-ts-mode
@@ -1187,6 +1334,7 @@ With prefix argument NEW, always create a new eshell buffer."
      . ,(eglot-alternatives
          '(
            ("rass" "--" "vtsls" "--stdio" "--" "oxlint" "--lsp")
+           ("vtsls" "--stdio")
            ("typescript-language-server" "--stdio")
            ))))
 
