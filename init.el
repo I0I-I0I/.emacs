@@ -1,4 +1,4 @@
-;;; init.el --- Emacs init -*- lexical-binding: t; -*-
+;;; init.el --- Emacs init -*- lexical-binding: t; no-byte-compile: t; -*-
 
 (setq custom-file (expand-file-name "custom.el" user-emacs-directory))
 (load custom-file 'noerror)
@@ -105,7 +105,10 @@
   (when (boundp 'native-comp-deferred-compilation)
     (setq native-comp-deferred-compilation t))
 
-  (run-with-idle-timer 10 t #'garbage-collect)
+  (add-hook 'emacs-startup-hook
+            (lambda ()
+              (setq gc-cons-threshold (* 16 1024 1024)
+                    gc-cons-percentage 0.1)))
 
   (setq-default fill-column 1000
                 indent-tabs-mode nil
@@ -208,6 +211,249 @@
   (defun move-text-down (arg) (interactive "*p") (move-text-internal arg))
   (defun move-text-up   (arg) (interactive "*p") (move-text-internal (- arg)))
 
+  ;; Frame/workflow helpers.
+  (defun my/project-or-cwd-name (&optional directory)
+    "Return the `project.el' name for DIRECTORY, falling back to its cwd name."
+    (let* ((directory (file-name-as-directory
+                       (expand-file-name (or directory default-directory))))
+           (default-directory directory)
+           (project (and (fboundp 'project-current) (project-current nil)))
+           (name (or (when project
+                       (if (fboundp 'project-name)
+                           (project-name project)
+                         (file-name-nondirectory
+                          (directory-file-name (project-root project)))))
+                     (file-name-nondirectory
+                      (directory-file-name directory)))))
+      (if (string= name "") directory name)))
+
+  (defun my/update-frame-name (&optional frame)
+    "Name FRAME after its selected buffer's project, falling back to cwd."
+    (let* ((frame (or frame (selected-frame)))
+           (window (and (frame-live-p frame) (frame-selected-window frame))))
+      ;; During desktop/frameset restoration Emacs can temporarily have live
+      ;; frames without a valid selected window.  Do not call `window-buffer'
+      ;; on nil there.
+      (when (window-live-p window)
+        (with-current-buffer (window-buffer window)
+          (set-frame-parameter
+           frame 'name
+           (my/project-or-cwd-name
+            (or (frame-parameter frame 'default-directory)
+                default-directory)))))))
+
+  (defun my/update-all-frame-names ()
+    "Update names for all live frames."
+    (dolist (frame (frame-list))
+      (my/update-frame-name frame)))
+
+  (defun my/update-frame-name-for-window (window)
+    "Update WINDOW's frame name from WINDOW's buffer."
+    (when (window-live-p window)
+      (my/update-frame-name (window-frame window))))
+
+  (defun my/update-frame-names-after-desktop-read ()
+    "Update frame names after `desktop-read' restores frames and buffers."
+    (run-at-time 0 nil #'my/update-all-frame-names))
+
+  (add-hook 'window-buffer-change-functions #'my/update-frame-name-for-window)
+  (add-hook 'after-change-major-mode-hook #'my/update-frame-name)
+  (add-hook 'desktop-after-read-hook #'my/update-frame-names-after-desktop-read)
+  (my/update-frame-name)
+
+  (defun my/new-workflow-frame ()
+    "Create a new workflow frame using current frame defaults."
+    (interactive)
+    (select-frame-set-input-focus (make-frame))
+    (my/update-frame-name))
+
+  (defun my/new-project-frame--tab-name (directory)
+    "Return a tab name for project DIRECTORY."
+    (let* ((directory (file-name-as-directory (expand-file-name directory)))
+           (existing-tab-names (mapcar (lambda (tab) (alist-get 'name tab))
+                                       (tab-bar-tabs))))
+      (or (when (boundp 'tabspaces-project-tab-map)
+            (cdr (assoc directory tabspaces-project-tab-map)))
+          (when (fboundp 'tabspaces-generate-descriptive-tab-name)
+            (tabspaces-generate-descriptive-tab-name directory existing-tab-names))
+          (file-name-nondirectory (directory-file-name directory)))))
+
+  (defun my/new-project-frame (directory)
+    "Create a new frame rooted at project DIRECTORY."
+    (interactive
+     (list (if (fboundp 'project-prompt-project-dir)
+               (project-prompt-project-dir)
+             (read-directory-name "Project directory: "))))
+    (let* ((project-directory (file-name-as-directory (expand-file-name directory)))
+           (default-directory project-directory))
+      (when (fboundp 'project--ensure-read-project-list)
+        (project--ensure-read-project-list))
+      (select-frame-set-input-focus (make-frame))
+      ;; A newly-created frame can inherit the selected frame's tab-bar state.
+      ;; Reset it to a single scratch tab, then turn that tab into the project
+      ;; workspace directly.  Avoid `tabspaces-open-or-create-project-and-workspace'
+      ;; here: it is designed for the current frame and may prompt via
+      ;; `project-switch-project' instead of just creating the new frame.
+      (when (fboundp 'tab-bar-tabs-set)
+        (switch-to-buffer (get-buffer-create "*scratch*"))
+        (tab-bar-tabs-set nil)
+        (set-frame-parameter nil 'current-tab nil))
+      (set-frame-name (my/project-or-cwd-name project-directory))
+      (let ((tab-name (my/new-project-frame--tab-name project-directory)))
+        (when (fboundp 'tab-bar-rename-tab)
+          (tab-bar-rename-tab tab-name))
+        (when (boundp 'tabspaces-project-tab-map)
+          (setq tabspaces-project-tab-map
+                (cons (cons project-directory tab-name)
+                      (assoc-delete-all project-directory tabspaces-project-tab-map)))))
+      (let ((default-directory project-directory))
+        (when-let* ((project (and (fboundp 'project--find-in-directory)
+                                  (project--find-in-directory project-directory))))
+          (project-remember-project project))
+        (if (and (fboundp 'project-dired) (project-current nil))
+            (project-dired)
+          (dired project-directory)))
+      (when (fboundp 'tabspaces-reset-buffer-list)
+        (tabspaces-reset-buffer-list))))
+
+  (defun my/change-frame-default-directory (directory)
+    "Change the default directory associated with the current frame to DIRECTORY."
+    (interactive
+     (list (read-directory-name
+            "Frame default directory: "
+            (or (frame-parameter nil 'default-directory) default-directory))))
+    (let ((directory (file-name-as-directory (expand-file-name directory))))
+      (set-frame-parameter nil 'default-directory directory)
+      ;; `default-directory' is buffer-local; update the selected buffer so
+      ;; commands run from it immediately use the new frame directory.
+      (setq default-directory directory)
+      (my/update-frame-name)
+      (message "Frame default directory: %s" directory)))
+
+  (defun my/rename-frame (name)
+    "Rename the current frame to NAME."
+    (interactive
+     (list (read-string "Frame name: " (frame-parameter nil 'name))))
+    (set-frame-name name))
+
+  (defun my/switch-frame (frame)
+    "Select a live frame by name."
+    (interactive
+     (let* ((frames (frame-list))
+            (choices (mapcar (lambda (frame)
+                               (cons (format "%s%s"
+                                             (or (frame-parameter frame 'name) "<unnamed>")
+                                             (if (eq frame (selected-frame)) "  (current)" ""))
+                                     frame))
+                             frames)))
+       (list (cdr (assoc (completing-read "Switch to frame: " choices nil t)
+                         choices)))))
+    (select-frame-set-input-focus frame))
+
+  (defun my/frame-buffer-list (&optional frame)
+    "Return live buffers associated with all tabs in FRAME."
+    (let* ((frame (or frame (selected-frame)))
+           (tabs (frame-parameter frame 'tabs))
+           buffers)
+      (if (and (fboundp 'tabspaces--buffer-list) tabs)
+          (let ((index 0))
+            (dolist (_tab tabs)
+              (setq buffers (append (tabspaces--buffer-list frame index) buffers))
+              (setq index (1+ index))))
+        (setq buffers (frame-parameter frame 'buffer-list)))
+      (delete-dups (seq-filter #'buffer-live-p buffers))))
+
+  (defun my/buffer-used-in-other-frame-p (buffer frame)
+    "Return non-nil when BUFFER belongs to any live frame other than FRAME."
+    (seq-some (lambda (other-frame)
+                (and (frame-live-p other-frame)
+                     (not (eq other-frame frame))
+                     (memq buffer (my/frame-buffer-list other-frame))))
+              (frame-list)))
+
+  (defun my/frame-local-buffer-p (buffer frame)
+    "Return non-nil when BUFFER should be removed when FRAME closes."
+    (and (buffer-live-p buffer)
+         (not (member (buffer-name buffer)
+                      (and (boundp 'tabspaces-include-buffers)
+                           tabspaces-include-buffers)))
+         (not (my/buffer-used-in-other-frame-p buffer frame))))
+
+  (defun my/kill-frame-local-buffers (&optional frame)
+    "Kill buffers that are local to FRAME's tabspaces."
+    (let ((frame (or frame (selected-frame))))
+      (dolist (buffer (my/frame-buffer-list frame))
+        (when (my/frame-local-buffer-p buffer frame)
+          (kill-buffer buffer)))))
+
+  (defconst my/auto-close-tab-name-regexp
+    "\\`\\(?:eshell\\|magit\\|pi\\|pi-agent\\|vterm\\)\\(?:\\'\\|: \\)"
+    "Regexp matching dedicated utility tabs to close before frame/desktop save/Emacs exit.")
+
+  (defun my/auto-close-tab-p (tab)
+    "Return non-nil when TAB is a dedicated utility tab."
+    (when-let* ((name (alist-get 'name tab)))
+      (string-match-p my/auto-close-tab-name-regexp name)))
+
+  (defun my/close-utility-tabs-in-frame (&optional frame)
+    "Close dedicated pi-agent, Eshell, Vterm and Magit tabs in FRAME.
+If a utility tab is the only tab left, reset it to a scratch/main tab so it is
+not persisted as a utility workspace when Emacs exits."
+    (let ((frame (or frame (selected-frame))))
+      (when (and (frame-live-p frame) (fboundp 'tab-bar-tabs))
+        (with-selected-frame frame
+          (dolist (name (delete-dups
+                         (delq nil
+                               (mapcar (lambda (tab)
+                                         (when (my/auto-close-tab-p tab)
+                                           (alist-get 'name tab)))
+                                       (tab-bar-tabs)))))
+            (if (> (length (tab-bar-tabs)) 1)
+                (ignore-errors (tab-bar-close-tab-by-name name))
+              (when (and (my/auto-close-tab-p (car (tab-bar-tabs)))
+                         (get-buffer "*scratch*"))
+                (switch-to-buffer (get-buffer-create "*scratch*"))
+                (when (fboundp 'tab-bar-rename-tab)
+                  (tab-bar-rename-tab "main"))
+                (set-frame-parameter nil 'buffer-list (list (current-buffer))))))))))
+
+  (defun my/close-utility-tabs-in-all-frames ()
+    "Close dedicated utility tabs in all live frames."
+    (dolist (frame (frame-list))
+      (my/close-utility-tabs-in-frame frame)))
+
+  (defun my/close-utility-tabs-before-desktop-save ()
+    "Close transient utility tabs before `desktop' serializes frames/tabs."
+    (my/close-utility-tabs-in-all-frames))
+
+  (defun my/close-utility-tabs-before-delete-frame (frame)
+    "Close dedicated utility tabs in FRAME before it is deleted."
+    (my/close-utility-tabs-in-frame frame))
+
+  (unless noninteractive
+    (add-hook 'delete-frame-functions #'my/close-utility-tabs-before-delete-frame)
+    (add-hook 'kill-emacs-hook #'my/close-utility-tabs-in-all-frames -100))
+
+  (defun my/delete-frame-or-emacs (&optional kill-local-buffers)
+    "Delete current frame, optionally killing frame-local buffers.
+On the last frame, quit Emacs.  With prefix argument KILL-LOCAL-BUFFERS,
+kill buffers that are local to the current frame before deleting it."
+    (interactive "P")
+    (if (cdr (frame-list))
+        (progn
+          (my/close-utility-tabs-in-frame (selected-frame))
+          (when kill-local-buffers
+            (my/kill-frame-local-buffers (selected-frame)))
+          (delete-frame))
+      (my/close-utility-tabs-in-all-frames)
+      (save-buffers-kill-emacs)))
+
+  (defun my/delete-frame-kill-local-buffers-command ()
+    "Delete current frame after killing buffers local to it."
+    (interactive)
+    (my/delete-frame-or-emacs t))
+
+
   ;; Vim-like C-r C-w for minibuffer prompts.
   (defun my-minibuffer-insert-symbol-at-point ()
     "Insert the symbol at point from the buffer that opened the minibuffer."
@@ -248,6 +494,21 @@
    ("C-x m" . global-mode-line-invisible-mode)
    ("C-c L" . my/copy-current-line-number)
    ("C-x F" . toggle-frame-fullscreen)
+   ("C-x 5 n" . my/new-workflow-frame)
+   ("C-x 5 p" . my/new-project-frame)
+   ("C-x 5 d" . my/change-frame-default-directory)
+   ("C-x 5 r" . my/rename-frame)
+   ("C-x 5 s" . my/switch-frame)
+   ("C-x 5 0" . my/delete-frame-or-emacs)
+   ("C-x 5 K" . my/delete-frame-kill-local-buffers-command)
+   ("C-x 5 F" . toggle-frame-fullscreen)
+   ("C-x 5 M" . toggle-frame-maximized)
+   ("C-x 5 x" . my/delete-frame-or-emacs)
+   ("C-x C-b" . ibuffer)
+   ("C-x C-S-b" . ibuffer)
+   ("C-x b" . switch-to-buffer)
+   ("C-x B" . switch-to-buffer-other-window)
+   ("C-x k" . kill-current-buffer)
    :map minibuffer-local-map
    ("M-l" . my-minibuffer-insert-symbol-at-point)
    :map minibuffer-local-ns-map
@@ -260,15 +521,151 @@
 ;; Tabs
 (use-package tab-bar
   :ensure nil
+  :demand t
   :custom
-  (tab-bar-show 1)
+  ;; Always show the tab bar, including on startup with a single tab.
+  (tab-bar-show t)
   (tab-bar-close-button-show nil)
   (tab-bar-new-button-show nil)
   :config
+  (defun my/tab-bar-switch-to-recent-or-prev-tab ()
+    "Switch to the most recent tab, or the previous tab if unavailable."
+    (interactive)
+    (if (fboundp 'tab-bar-switch-to-recent-tab)
+        (call-interactively #'tab-bar-switch-to-recent-tab)
+      (tab-bar-switch-to-prev-tab)))
+
+  (defun my/tab-bar-select-tab-by-number (number)
+    "Switch to tab-bar tab NUMBER, where 1 is the first tab."
+    (interactive "nTab number: ")
+    (let ((tabs (tab-bar-tabs)))
+      (unless (and (integerp number) (<= 1 number) (<= number (length tabs)))
+        (user-error "No tab number %s" number))
+      (tab-bar-select-tab number)))
+
+  (defun my/define-tab-number-keys (map)
+    "Bind C-c 1..C-c 9 in MAP to switch to tab-bar tabs 1..9."
+    (dotimes (index 9)
+      (let ((number (1+ index)))
+        (define-key map (kbd (format "C-c %d" number))
+                    (lambda ()
+                      (interactive)
+                      (my/tab-bar-select-tab-by-number number))))))
+
+  (my/define-tab-number-keys my/override-map)
+
   (tab-bar-mode 1)
+  (when (fboundp 'tab-bar-history-mode)
+    (tab-bar-history-mode 1))
   :bind (:map my/override-map
+              ("C-M-i" . tab-bar-switch-to-prev-tab)
               ("C-M-<tab>" . tab-bar-switch-to-prev-tab)
-              ("C-M-o" . tab-bar-switch-to-next-tab)))
+              ("C-M-o" . tab-bar-switch-to-next-tab)
+              ("C-x t l" . my/tab-bar-switch-to-recent-or-prev-tab)))
+
+(use-package tabspaces
+  :ensure t
+  :after tab-bar
+  :demand t
+  :preface
+  (defun my/tabspaces--local-buffer-name-list (&optional frame)
+    "Return local buffer names for FRAME's current tabspace."
+    (mapcar #'buffer-name (tabspaces--buffer-list frame)))
+
+  (defun my/tabspaces--read-local-buffer (prompt &optional frame)
+    "Read a buffer from FRAME's current tabspace."
+    (let ((buffers (my/tabspaces--local-buffer-name-list frame)))
+      (read-buffer prompt buffers nil
+                   (lambda (b)
+                     (member (if (stringp b) b (car b)) buffers)))))
+
+  (defun my/tabspaces--other-live-frame ()
+    "Return another live frame, or nil when this is the only frame."
+    (seq-find (lambda (frame)
+                (and (frame-live-p frame)
+                     (not (eq frame (selected-frame)))
+                     (not (window-minibuffer-p (frame-selected-window frame)))))
+              (frame-list)))
+
+  (defun my/tabspaces-switch-to-buffer-other-window (buffer)
+    "Switch to a local tabspace BUFFER in another window."
+    (interactive
+     (list (my/tabspaces--read-local-buffer
+            "Switch to local buffer other window: ")))
+    (switch-to-buffer-other-window buffer))
+
+  (defun my/tabspaces-switch-to-buffer-other-frame (buffer)
+    "Switch to BUFFER in another frame.
+Unlike plain tab-local switching, this offers all live buffers so `C-x 5 b'
+can be used like native Emacs to put any buffer into another frame's current
+tabspace."
+    (interactive
+     (list (read-buffer "Switch to buffer other frame: " nil t)))
+    (switch-to-buffer-other-frame buffer))
+
+  (defun my/tabspaces-remove-current-buffer-dwim (&optional kill)
+    "Remove current buffer from this tabspace without killing it globally.
+With prefix argument KILL, really kill the current buffer."
+    (interactive "P")
+    (if kill
+        (kill-current-buffer)
+      (let ((buffer (current-buffer)))
+        (if (and (bound-and-true-p tabspaces-mode)
+                 (fboundp 'tabspaces-remove-current-buffer))
+            (progn
+              (tabspaces-remove-current-buffer)
+              ;; Be strict: remove from this frame/tab list, but leave the
+              ;; live buffer available to any other tab or frame using it.
+              (when (buffer-live-p buffer)
+                (set-frame-parameter
+                 nil 'buffer-list
+                 (delq buffer (copy-sequence (frame-parameter nil 'buffer-list))))
+                (set-frame-parameter
+                 nil 'buried-buffer-list
+                 (delq buffer (copy-sequence (frame-parameter nil 'buried-buffer-list))))))
+          (bury-buffer)))))
+
+  (defun my/tabspaces-add-buffer (buffer)
+    "Add an existing global BUFFER to the current tabspace."
+    (interactive
+     (list (read-buffer "Add buffer to current tabspace: "
+                        nil t
+                        (lambda (b)
+                          (not (member (if (stringp b) b (car b))
+                                       (my/tabspaces--local-buffer-name-list)))))))
+    (switch-to-buffer buffer))
+  :custom
+  ;; Make normal buffer switching tab-local.
+  (tabspaces-use-filtered-buffers-as-default t)
+  (tabspaces-keymap-prefix "C-x t")
+  (tabspaces-default-tab "main")
+  (tabspaces-remove-to-default t)
+  ;; Always keep these utility buffers visible from every tab.
+  (tabspaces-include-buffers '("*scratch*" "*Messages*"))
+  :config
+  ;; Native command remaps: commands that normally act globally now act on the
+  ;; current tabspace.  Use `C-u C-x k' when you really want to kill a buffer.
+  (define-key tabspaces-mode-map (kbd "C-x t") tabspaces-command-map)
+  (define-key tabspaces-mode-map [remap switch-to-buffer] #'tabspaces-switch-to-buffer)
+  (define-key tabspaces-mode-map [remap switch-to-buffer-other-window]
+              #'my/tabspaces-switch-to-buffer-other-window)
+  (define-key tabspaces-mode-map [remap switch-to-buffer-other-frame]
+              #'my/tabspaces-switch-to-buffer-other-frame)
+  (define-key tabspaces-mode-map [remap kill-buffer] #'my/tabspaces-remove-current-buffer-dwim)
+  (define-key tabspaces-mode-map [remap kill-current-buffer] #'my/tabspaces-remove-current-buffer-dwim)
+  (unless noninteractive
+    (tabspaces-mode 1))
+  :bind (:map my/override-map
+              ("C-x b" . tabspaces-switch-to-buffer)
+              ("C-x B" . my/tabspaces-switch-to-buffer-other-frame)
+              ("C-x 5 b" . my/tabspaces-switch-to-buffer-other-frame)
+              ("C-x k" . my/tabspaces-remove-current-buffer-dwim)
+              ("C-x t TAB" . tabspaces-switch-buffer-and-tab)
+              ("C-x t n" . tabspaces-switch-or-create-workspace)
+              ("C-x t p" . tabspaces-open-or-create-project-and-workspace)
+              ("C-x t a" . my/tabspaces-add-buffer)
+              ("C-x t r" . tabspaces-remove-current-buffer)
+              ("C-x t k" . tabspaces-close-workspace)))
 
 (defun my/project-tab-name (prefix)
   "Return PREFIX plus the current project/directory name."
@@ -286,10 +683,21 @@
 
 (defun my/switch-to-named-tab (name)
   "Switch to tab-bar tab NAME, creating it when needed."
-  (if (member name (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs)))
-      (tab-bar-switch-to-tab name)
-    (tab-bar-new-tab)
-    (tab-bar-rename-tab name)))
+  (let ((directory default-directory))
+    (if (member name (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs)))
+        (tab-bar-switch-to-tab name)
+      ;; Do not let new tabspaces inherit the current buffer from the
+      ;; previous tab; start them on *scratch*, but keep the caller's cwd so
+      ;; commands run immediately after tab creation, such as Magit and Pi,
+      ;; still see the originating project directory.
+      (let ((tab-bar-new-tab-choice
+             (lambda ()
+               (let ((buffer (get-buffer-create "*scratch*")))
+                 (with-current-buffer buffer
+                   (setq default-directory directory))
+                 buffer))))
+        (tab-bar-new-tab))
+      (tab-bar-rename-tab name))))
 
 (use-package crux
   :ensure t
@@ -300,11 +708,6 @@
   (declare-function crux-kill-region-region-or-sexp-or-line "crux")
   (declare-function crux-kill-ring-save-region-or-point-to-eol "crux")
   :config
-  (crux-with-region-or-buffer indent-region)
-  (crux-with-region-or-buffer untabify)
-  (crux-with-region-or-line comment-or-uncomment-region)
-  (crux-with-region-or-sexp-or-line kill-region)
-  (crux-with-region-or-point-to-eol kill-ring-save)
   :bind (("C-a"     . crux-move-beginning-of-line)
          ;; ("C-c o"   . crux-open-with)
          ("C-c C-D" . crux-delete-file-and-buffer)
@@ -352,8 +755,9 @@
       :default-height 140
       :line-spacing 1)))
   :config
-  (fontaine-mode t)
-  (fontaine-set-preset 'maple-mono))
+  (when (display-graphic-p)
+    (fontaine-mode t)
+    (fontaine-set-preset 'maple-mono)))
 
 ;; Mode line
 (defvar my/mode-line-extra-format nil
@@ -368,13 +772,11 @@
         (abbreviate-file-name buffer-file-name))
     (buffer-name)))
 
-(defun my/mode-line-perspective ()
-  "Return the current Perspective name for the mode line."
-  (when (and (bound-and-true-p persp-mode)
-             (fboundp 'persp-current-name))
-    (let ((name (persp-current-name)))
-      (unless (string= name "")
-        (format "[%s] " name)))))
+(defun my/mode-line-tab-name ()
+  "Return the current tab-bar tab name for the mode line."
+  (when (fboundp 'tab-bar--current-tab)
+    (when-let* ((name (alist-get 'name (tab-bar--current-tab))))
+      (format "[%s] " name))))
 
 (defun my/mode-line-vc ()
   "Return compact VC branch info."
@@ -384,7 +786,7 @@
 (setq-default
  mode-line-format
  '("%e "
-   (:eval (my/mode-line-perspective))
+   (:eval (my/mode-line-tab-name))
    "%* "
    (:eval (my/mode-line-buffer-name))
    "  ("
@@ -517,10 +919,58 @@
 ;; IBuffer
 (use-package ibuffer
   :ensure nil
-  :hook (ibuffer-mode . (lambda ()
-                          (ibuffer-auto-mode 1)
-                          (ibuffer-switch-to-saved-filter-groups "default")))
+  :hook (ibuffer-mode . my/ibuffer-setup-frame-groups)
   :config
+  (require 'ibuf-ext)
+
+  (define-ibuffer-filter frame-name
+      "Limit current view to buffers associated with frames named QUALIFIER."
+    (:description "frame name"
+                  :reader (completing-read "Frame name: "
+                                           (my/ibuffer-frame-names) nil t))
+    (if (eq qualifier 'my/ibuffer-unframed)
+        (not (my/ibuffer-buffer-frame-names buf))
+      (member qualifier (my/ibuffer-buffer-frame-names buf))))
+
+  (defun my/ibuffer-frame-name (frame)
+    "Return FRAME's display name."
+    (or (frame-parameter frame 'name) "<unnamed>"))
+
+  (defun my/ibuffer-frame-names ()
+    "Return the names of all live frames."
+    (delete-dups (mapcar #'my/ibuffer-frame-name (frame-list))))
+
+  (defun my/ibuffer-buffer-frame-names (buffer)
+    "Return names of live frames whose tabspaces include BUFFER."
+    (delq nil
+          (mapcar (lambda (frame)
+                    (when (memq buffer (my/frame-buffer-list frame))
+                      (my/ibuffer-frame-name frame)))
+                  (frame-list))))
+
+  (defun my/ibuffer-refresh-frame-filter-groups ()
+    "Regenerate `ibuffer' filter groups from current frame names."
+    (setq ibuffer-saved-filter-groups
+          `(("default"
+             ,@(mapcar (lambda (name)
+                         (list (format "Frame: %s" name)
+                               `(frame-name . ,name)))
+                       (my/ibuffer-frame-names))
+             ("Unframed" (frame-name . my/ibuffer-unframed))))))
+
+  (defun my/ibuffer-setup-frame-groups ()
+    "Group `ibuffer' buffers by frame name."
+    (ibuffer-auto-mode 1)
+    (my/ibuffer-refresh-frame-filter-groups)
+    (ibuffer-switch-to-saved-filter-groups "default"))
+
+  (defun my/ibuffer-update-frame-groups ()
+    "Refresh frame-name groups, then update `ibuffer'."
+    (interactive)
+    (my/ibuffer-refresh-frame-filter-groups)
+    (ibuffer-switch-to-saved-filter-groups "default")
+    (ibuffer-update nil t))
+
   (setq ibuffer-show-empty-filter-groups nil
         ibuffer-always-show-last-buffer nil
         ibuffer-default-sorting-mode 'recency
@@ -528,7 +978,7 @@
 
   :bind (("C-x C-M-b" . ibuffer)
          :map ibuffer-mode-map
-         ("g" . ibuffer-update)
+         ("g" . my/ibuffer-update-frame-groups)
          ("/" . ibuffer-filter-by-mode)
          ("C-c / n" . ibuffer-filter-by-name)
          ("C-c / f" . ibuffer-filter-by-filename)
@@ -561,8 +1011,80 @@
 (use-package vterm
   :ensure t
   :commands (vterm)
+  :preface
+  (require 'project)
+  (require 'seq)
+
+  (defvar my/vterm-return-tab nil
+    "Tab to return to when toggling away from the vterm tab.")
+
+  (defvar-local my/vterm-tab-name nil
+    "Dedicated tab name for this vterm buffer.")
+
+  (defun my/vterm-tab-name ()
+    "Return the dedicated vterm tab name for this frame."
+    "vterm")
+
+  (defun my/vterm--project-dir ()
+    "Return project root if available, else current `default-directory`."
+    (if-let* ((pr (project-current nil)))
+        (expand-file-name (project-root pr))
+      (expand-file-name default-directory)))
+
+  (defun my/vterm--buffer-p (b)
+    (with-current-buffer b
+      (derived-mode-p 'vterm-mode)))
+
+  (defun my/vterm--buf-dir (b)
+    "Return normalized `default-directory` for vterm buffer B."
+    (with-current-buffer b
+      (expand-file-name default-directory)))
+
+  (defun my/vterm--find-by-dir (dir)
+    "Find an existing vterm buffer whose `default-directory` matches DIR."
+    (let ((target (expand-file-name dir)))
+      (seq-find (lambda (b)
+                  (and (my/vterm--buffer-p b)
+                       (string= (my/vterm--buf-dir b) target)))
+                (buffer-list))))
+
+  (defun my/vterm--new-in-dir (dir)
+    "Create a new vterm buffer and start it in DIR."
+    (let ((default-directory dir))
+      (vterm (generate-new-buffer-name
+              (format "*vterm: %s*"
+                      (file-name-nondirectory
+                       (directory-file-name dir)))))))
+
+  (defun my/vterm-in-tab (&optional new)
+    "Open/toggle vterm in a dedicated project tab.
+With prefix argument NEW, always create a new vterm buffer."
+    (interactive "P")
+    (let* ((dir (my/vterm--project-dir))
+           (vterm-tab (my/vterm-tab-name))
+           (current-tab (my/current-tab-name))
+           (tab-names (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs)))
+           (tab-exists (member vterm-tab tab-names)))
+      (if (and (not new)
+               (string= current-tab vterm-tab)
+               my/vterm-return-tab
+               (member my/vterm-return-tab tab-names))
+          (tab-bar-switch-to-tab my/vterm-return-tab)
+        (unless (string= current-tab vterm-tab)
+          (setq my/vterm-return-tab current-tab))
+        (my/switch-to-named-tab vterm-tab)
+        (unless tab-exists
+          (delete-other-windows)
+          (set-frame-parameter nil 'buffer-list nil))
+        (let ((buf (and (not new) (my/vterm--find-by-dir dir))))
+          (if buf
+              (switch-to-buffer buf)
+            (my/vterm--new-in-dir dir)))
+        (setq-local my/vterm-tab-name vterm-tab)
+        (unless tab-exists
+          (set-frame-parameter nil 'buffer-list (list (current-buffer)))))))
   :hook (vterm-mode . (lambda () (display-line-numbers-mode -1)))
-  :bind ("C-c t" . vterm))
+  :bind ("C-c t" . my/vterm-in-tab))
 
 (use-package eshell
   :ensure nil
@@ -601,43 +1123,47 @@
     (let ((default-directory dir))
       (eshell t)))
 
-  (defvar my/eshell--return-buffers (make-hash-table :test 'eq :weakness 'key)
-    "Eshell buffers mapped to the buffer they should toggle back to.")
+  (defvar my/eshell-return-tab nil
+    "Tab to return to when toggling away from the eshell tab.")
 
-  (defun my/eshell--open-new (dir origin)
-    "Create an eshell in DIR and remember ORIGIN as its return buffer."
-    (my/eshell--new-in-dir dir)
-    (when (my/eshell--buffer-p (current-buffer))
-      (puthash (current-buffer) origin my/eshell--return-buffers)))
+  (defvar-local my/eshell-tab-name nil
+    "Dedicated tab name for this eshell buffer.")
 
-  (defun my/eshell--return-from (buf)
-    "Switch from eshell BUF back to its remembered buffer."
-    (let ((origin (gethash buf my/eshell--return-buffers)))
-      (if (buffer-live-p origin)
-          (switch-to-buffer origin)
-        (switch-to-buffer (other-buffer buf t)))))
+  (defun my/eshell-tab-name ()
+    "Return the dedicated eshell tab name for this frame."
+    "eshell")
 
-  (defun my/eshell--toggle-buffer (buf dir)
-    "Toggle to BUF, or create an eshell in DIR when BUF is nil."
-    (let ((origin (current-buffer)))
-      (cond
-       ((eq origin buf)
-        (my/eshell--return-from buf))
-       (buf
-        (puthash buf origin my/eshell--return-buffers)
-        (switch-to-buffer buf))
-       (t
-        (my/eshell--open-new dir origin)))))
+  (defun my/eshell--open-in-tab (dir &optional new)
+    "Open/toggle eshell for DIR in a dedicated project tab.
+With NEW, always create a new eshell buffer."
+    (let* ((eshell-tab (my/eshell-tab-name))
+           (current-tab (my/current-tab-name))
+           (tab-names (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs)))
+           (tab-exists (member eshell-tab tab-names)))
+      (if (and (not new)
+               (string= current-tab eshell-tab)
+               my/eshell-return-tab
+               (member my/eshell-return-tab tab-names))
+          (tab-bar-switch-to-tab my/eshell-return-tab)
+        (unless (string= current-tab eshell-tab)
+          (setq my/eshell-return-tab current-tab))
+        (my/switch-to-named-tab eshell-tab)
+        (unless tab-exists
+          (delete-other-windows)
+          (set-frame-parameter nil 'buffer-list nil))
+        (let ((buf (and (not new) (my/eshell--find-by-dir dir))))
+          (if buf
+              (switch-to-buffer buf)
+            (my/eshell--new-in-dir dir)))
+        (setq-local my/eshell-tab-name eshell-tab)
+        (unless tab-exists
+          (set-frame-parameter nil 'buffer-list (list (current-buffer)))))))
 
   (defun my/toggle-eshell-here (&optional new)
-    "Toggle an eshell buffer for the current directory.
+    "Open/toggle eshell for the current directory in a dedicated tab.
 With prefix argument NEW, always create a new eshell buffer."
     (interactive "P")
-    (let* ((dir (my/eshell--current-dir))
-           (buf (my/eshell--find-by-dir dir)))
-      (if new
-          (my/eshell--open-new dir (current-buffer))
-        (my/eshell--toggle-buffer buf dir))))
+    (my/eshell--open-in-tab (my/eshell--current-dir) new))
 
   (defun my/eshell--project-dir ()
     "Return project root if available, else current `default-directory`."
@@ -646,14 +1172,10 @@ With prefix argument NEW, always create a new eshell buffer."
       (my/eshell--current-dir)))
 
   (defun my/toggle-eshell-project (&optional new)
-    "Toggle an eshell buffer for the project root.
+    "Open/toggle eshell for the project root in a dedicated tab.
 With prefix argument NEW, always create a new eshell buffer."
     (interactive "P")
-    (let* ((dir (my/eshell--project-dir))
-           (buf (my/eshell--find-by-dir dir)))
-      (if new
-          (my/eshell--open-new dir (current-buffer))
-        (my/eshell--toggle-buffer buf dir))))
+    (my/eshell--open-in-tab (my/eshell--project-dir) new))
 
   (defun my/eshell-history-fuzzy ()
     (interactive)
@@ -676,7 +1198,13 @@ With prefix argument NEW, always create a new eshell buffer."
   (use-package eat
     :ensure t
     :commands (eat eat-eshell-mode)
-    :hook (eshell-mode . eat-eshell-mode))
+    :hook (eshell-mode . eat-eshell-mode)
+    :config
+    ;; Eat's Eshell keymaps can take precedence and pass C-c digits through to
+    ;; the terminal.  Bind tab switching there explicitly too.
+    (when (fboundp 'my/define-tab-number-keys)
+      (my/define-tab-number-keys eat-eshell-emacs-mode-map)
+      (my/define-tab-number-keys eat-eshell-semi-char-mode-map)))
 
   (use-package bash-completion
     :ensure t
@@ -743,10 +1271,27 @@ With prefix argument NEW, always create a new eshell buffer."
             ((executable-find "xdg-open") (start-process "xdg-open" nil "xdg-open" target))
             (t (user-error "No opener found")))))
 
-  (add-hook 'eshell-mode-hook
-            (lambda ()
-              (keymap-set eshell-mode-map "C-r" #'my/eshell-history-fuzzy)
-              (keymap-set eshell-mode-map "C-l" #'eshell/clear))))
+  (defun my/eshell-setup-keymaps ()
+    "Set up Eshell key bindings without global tab-switch overrides."
+    ;; `my/override-map' has higher priority than `eshell-mode-map'.  Keep the
+    ;; rest of the override bindings, but let C-M-i/C-M-<tab> complete in Eshell.
+    (let ((map (copy-keymap my/override-map)))
+      (define-key map (kbd "C-M-i") nil)
+      (define-key map (kbd "C-M-<tab>") nil)
+      (when (fboundp 'my/define-tab-number-keys)
+        (my/define-tab-number-keys map))
+      (setq-local minor-mode-overriding-map-alist
+                  (cons (cons 'my/override-mode map)
+                        (assq-delete-all 'my/override-mode
+                                         minor-mode-overriding-map-alist))))
+    (when (fboundp 'my/define-tab-number-keys)
+      (my/define-tab-number-keys eshell-mode-map))
+    (keymap-set eshell-mode-map "C-M-i" #'completion-at-point)
+    (keymap-set eshell-mode-map "C-M-<tab>" #'completion-at-point)
+    (keymap-set eshell-mode-map "C-r" #'my/eshell-history-fuzzy)
+    (keymap-set eshell-mode-map "C-l" #'eshell/clear))
+
+  (add-hook 'eshell-mode-hook #'my/eshell-setup-keymaps))
 
 ;; Undo
 (use-package undo-fu
@@ -862,12 +1407,22 @@ With prefix argument NEW, always create a new eshell buffer."
       '((elisp "https://github.com/Wilfred/tree-sitter-elisp")
         (svelte "https://github.com/tree-sitter-grammars/tree-sitter-svelte")))
 
-(when (fboundp 'treesit-install-language-grammar)
-  (unless (treesit-language-available-p 'svelte)
-    (treesit-install-language-grammar 'svelte)))
+(defun my/install-missing-treesit-grammars ()
+  "Install Tree-sitter grammars used by this configuration when missing."
+  (interactive)
+  (unless (fboundp 'treesit-install-language-grammar)
+    (user-error "Tree-sitter grammar installation is not available"))
+  (dolist (language '(svelte))
+    (unless (treesit-language-available-p language)
+      (treesit-install-language-grammar language))))
 
-(setopt treesit-enabled-modes t
-        treesit-auto-install-grammar 'always)
+(use-package treesit-auto
+  :ensure t
+  :defer 1
+  :custom
+  (treesit-auto-install 'prompt)
+  :config
+  (global-treesit-auto-mode))
 
 ;; Selection
 (use-package expreg
@@ -879,7 +1434,12 @@ With prefix argument NEW, always create a new eshell buffer."
   :vc (:url "https://github.com/magnars/multiple-cursors.el"
             :rev :newest
             :branch "master")
-  :demand t
+  :commands (mc/mark-next-like-this
+             mc/mark-previous-like-this
+             mc/skip-to-next-like-this
+             mc/skip-to-previous-like-this
+             mc/mark-all-like-this
+             mc/edit-lines)
   :bind (("M-n" . mc/mark-next-like-this)
          ("M-p" . mc/mark-previous-like-this)
          ("M-N" . mc/skip-to-next-like-this)
@@ -989,6 +1549,14 @@ opened without hiding or toggling the pi buffer."
                      (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs))))
         (tab-bar-switch-to-tab my/pi-coding-agent-return-tab)
       (tab-bar-switch-to-prev-tab)))
+  :config
+  (defun my/pi-coding-agent-resume-without-historical-sort (orig-fun &rest args)
+    "Call ORIG-FUN with completion order preserved for pi resume sessions."
+    (let ((completions-sort nil))
+      (apply orig-fun args)))
+
+  (advice-add 'pi-coding-agent--resume-session-from-directory
+              :around #'my/pi-coding-agent-resume-without-historical-sort)
   :bind
   ("C-c a" . my/pi-coding-agent-in-tab)
   (:map pi-coding-agent-chat-mode-map
@@ -1032,7 +1600,7 @@ opened without hiding or toggling the pi buffer."
   (olivetti-body-width 120)
   (olivetti-minimum-body-width 100)
   :hook
-  (olivetti-mode . visual-line-mode)
+  (olivetti-mode . (lambda () (visual-line-mode 1)))
   :config
   (defun my/turn-on-olivetti ()
     (unless (or (minibufferp)
@@ -1057,7 +1625,7 @@ opened without hiding or toggling the pi buffer."
   (dired-create-destination-dirs 'always)
   (dired-create-destination-dirs-on-trailing-dirsep t)
   (confirm-nonexistent-file-or-buffer nil)
-  (delete-by-moving-to-trash 'move-file-to-trash)
+  (delete-by-moving-to-trash t)
   (dired-listing-switches
    (if (eq system-type 'darwin)
        "-alh"
@@ -1084,6 +1652,7 @@ opened without hiding or toggling the pi buffer."
 
 (use-package ready-player
   :ensure t
+  :defer 2
   :custom
   (ready-player-autoplay nil)
   (ready-player-thumbnail-max-pixel-height 500)
@@ -1103,42 +1672,32 @@ opened without hiding or toggling the pi buffer."
   :bind (:map dired-mode-map
               ("C-c C-p" . dired-preview-mode)))
 
-;; Tmux  Perspective
+;; Desktop session persistence
 
-(use-package perspective
-  :bind
-  (("C-x C-S-b" . persp-ibuffer)
-   ("C-x C-b" . persp-buffer-menu)
-   ("C-x b" . persp-switch-to-buffer*)
-   ("C-x B" . persp-switch-to-buffer)
-   ("C-x k" . persp-kill-buffer*)
-   ("C-c p l" . persp-switch-last))
-  :init
-  (setq switch-to-prev-buffer-skip
-        (lambda (win buff bury-or-kill)
-          (not (persp-is-current-buffer buff))))
-
-  (add-hook 'ibuffer-hook
-            (lambda ()
-              (persp-ibuffer-set-filter-groups)
-              (unless (eq ibuffer-sorting-mode 'alphabetic)
-                (ibuffer-do-sort-by-alphabetic))))
-
-  (add-hook 'kill-emacs-hook #'persp-state-save)
-
-  (add-hook
-   'emacs-startup-hook
-   (lambda ()
-     (when (file-exists-p persp-state-default-file)
-       (persp-state-load persp-state-default-file))))
-
+(use-package desktop
+  :ensure nil
   :custom
-  (persp-show-modestring nil)
-  (persp-mode-prefix-key (kbd "C-c p"))
-  (persp-state-default-file
-   (expand-file-name "perspective-session" user-emacs-directory))
-  :init
-  (persp-mode))
+  (desktop-path (list user-emacs-directory))
+  (desktop-dirname user-emacs-directory)
+  (desktop-base-file-name "desktop.el")
+  (desktop-save t)
+  (desktop-load-locked-desktop t)
+  (desktop-restore-eager 5)
+  (desktop-auto-save-timeout 300)
+  :config
+  ;; Keep frame restoration enabled.  `my/update-frame-name' is defensive while
+  ;; frameset is rebuilding frames/windows during desktop restore.
+  (when (boundp 'desktop-restore-frames)
+    (setq desktop-restore-frames t))
+  ;; Do not persist transient utility workspaces
+  (unless noninteractive
+    (add-hook 'desktop-save-hook #'my/close-utility-tabs-before-desktop-save))
+  (setq desktop-buffers-not-to-save
+        (concat "\\`\\*\\(?:vterm\\|eshell\\|magit\\|pi-coding-agent\\|pi-agent\\).*\\*\\(?:<[0-9]+>\\)?\\'"
+                (when desktop-buffers-not-to-save
+                  (concat "\\|" desktop-buffers-not-to-save))))
+  (unless noninteractive
+    (desktop-save-mode 1)))
 
 ;; Org mode
 (use-package org-tempo
@@ -1193,11 +1752,95 @@ opened without hiding or toggling the pi buffer."
   (defun my/org-confirm-babel-evaluate (lang _body)
     (not (member lang '("emacs-lisp"))))
 
+  (defun my/org-notes-tab-name ()
+    "Return the dedicated notes tab name."
+    "notes")
+
+  (defun my/org-read-note-file ()
+    "Read an Org note file from `org-directory'."
+    (let ((default-directory (file-name-as-directory org-directory)))
+      (read-file-name "Find note: " default-directory)))
+
   (defun my/org-find-note ()
     "Open `find-file' from `org-directory' to search or create notes."
     (interactive)
-    (let ((default-directory (file-name-as-directory org-directory)))
-      (call-interactively #'find-file)))
+    (find-file (my/org-read-note-file)))
+
+  (defun my/org-find-note-in-tab ()
+    "Read a note file, then open it in a dedicated notes tab.
+Do not create or switch tabs until after the file has been selected."
+    (interactive)
+    (let ((file (my/org-read-note-file))
+          (notes-tab (my/org-notes-tab-name)))
+      (let ((tab-exists (member notes-tab
+                                (mapcar (lambda (tab) (alist-get 'name tab))
+                                        (tab-bar-tabs)))))
+        (my/switch-to-named-tab notes-tab)
+        (unless tab-exists
+          (when (fboundp 'tabspaces-reset-buffer-list)
+            (tabspaces-reset-buffer-list))))
+      (find-file file)))
+
+  (defun my/org-todo-file ()
+    "Return the Org todos file."
+    (expand-file-name "todo.org" org-directory))
+
+  (defun my/org-ensure-todo-file ()
+    "Ensure `my/org-todo-file' exists, then return it."
+    (let ((file (my/org-todo-file)))
+      (make-directory (file-name-directory file) t)
+      (unless (file-exists-p file)
+        (with-temp-buffer (write-file file)))
+      file))
+
+  (defun my/org-ensure-heading (heading)
+    "Ensure a top-level HEADING exists in the current Org buffer.
+Leave point at the beginning of that heading."
+    (goto-char (point-min))
+    (let (found)
+      (while (and (not found) (re-search-forward org-heading-regexp nil t))
+        (when (and (= (org-current-level) 1)
+                   (string= (org-get-heading t t t t) heading))
+          (setq found t)
+          (beginning-of-line)))
+      (unless found
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (insert "* " heading "\n")
+        (forward-line -1)))
+    (point))
+
+  (defun my/org-todo-title-headings ()
+    "Return valid top-level todo title headings from `my/org-todo-file'."
+    (with-current-buffer (find-file-noselect (my/org-ensure-todo-file))
+      (org-with-wide-buffer
+       (goto-char (point-min))
+       (let (headings)
+         (while (re-search-forward org-heading-regexp nil t)
+           (when (= (org-current-level) 1)
+             (let ((heading (org-get-heading t t t t)))
+               (unless (org-get-todo-state)
+                 (push heading headings)))))
+         (nreverse headings)))))
+
+  (defun my/org-capture-todo-under-heading (heading)
+    "Position `org-capture' on top-level HEADING for a child todo.
+For `file+function' capture targets, Org expects the function to leave
+point on the parent heading; Org then inserts the entry as a child."
+    (set-buffer (find-file-noselect (my/org-ensure-todo-file)))
+    (save-restriction
+      (widen)
+      (my/org-ensure-heading heading)
+      (point)))
+
+  (defun my/org-capture-todo ()
+    "Position `org-capture' under a chosen todo title in the todos file."
+    (let* ((titles (my/org-todo-title-headings))
+           (title (string-trim
+                   (completing-read "Todo title: " titles nil nil))))
+      (if (string-empty-p title)
+          (user-error "Todo title cannot be empty")
+        (my/org-capture-todo-under-heading title))))
   :init
   (global-set-key (kbd "C-z") my/org-prefix-map)
 
@@ -1237,7 +1880,6 @@ opened without hiding or toggling the pi buffer."
 
   (org-src-preserve-indentation t)
   (org-src-window-setup 'current-window)
-  (org-confirm-babel-evaluate #'my/org-confirm-babel-evaluate)
 
   (org-directory (expand-file-name "~/Dropbox/Apps/remotely-save/notes/"))
   (org-agenda-files (list org-directory))
@@ -1252,11 +1894,15 @@ opened without hiding or toggling the pi buffer."
   (org-default-notes-file (expand-file-name "inbox.org" org-directory))
   (org-todo-keywords
    '((sequence "TODO(t)" "WAIT(w@)" "|" "DONE(d!)" "CANCELLED(c@)")))
-  (org-refile-targets '((org-agenda-files :maxlevel . 3)))
+  (org-refile-targets `((org-agenda-files :maxlevel . 3)
+                        (,(my/org-todo-file) :maxlevel . 3)))
   (org-outline-path-complete-in-steps nil)
   (org-refile-use-outline-path 'file)
   (org-capture-templates
-   '(("t" "Task" entry
+   `(("t" "Todo" entry
+      (file+function ,(my/org-todo-file) my/org-capture-todo)
+      "* TODO %?\n")
+     ("i" "Inbox task" entry
       (file "inbox.org")
       "* TODO %?\n")))
 
@@ -1275,7 +1921,7 @@ opened without hiding or toggling the pi buffer."
   (:map my/org-prefix-map
         ("a" . org-agenda)
         ("c" . org-capture)
-        ("n" . my/org-find-note)
+        ("n" . my/org-find-note-in-tab)
         ("T" . org-todo-list)
         :map org-mode-map
         ("C-c C-d" . org-deadline)))
@@ -1284,7 +1930,7 @@ opened without hiding or toggling the pi buffer."
 
 (use-package mason
   :ensure t
-  :demand t
+  :defer 2
   :config
   (mason-ensure))
 
@@ -1304,9 +1950,6 @@ opened without hiding or toggling the pi buffer."
   :config
   (setq-default eglot-workspace-configuration
                 '(:ty (:diagnosticMode "workspace")
-                      ;; vtsls asks Eglot for section "", so it needs a whole
-                      ;; VS-Code-style configuration tree here rather than only
-                      ;; :typescript/:javascript sections.
                       "" (:typescript (:tsserver (:experimental (:enableProjectDiagnostics t)))
                                       :javascript (:tsserver (:experimental (:enableProjectDiagnostics t))))
                       :typescript (:tsserver (:experimental (:enableProjectDiagnostics t)))
@@ -1498,7 +2141,7 @@ view."
 
 (use-package elfeed
   :ensure t
-  :bind ("C-c f" . elfeed)
+  :bind ("C-c F" . elfeed)
   :custom
   (elfeed-feeds
    '(
@@ -1536,4 +2179,4 @@ view."
   :vc (:url "https://github.com/agzam/remoto.el"
             :rev :newest
             :branch "main")
-  :demand t)
+  :defer t)
