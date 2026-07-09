@@ -99,7 +99,8 @@ cd emacs
     --with-tiff \
     --with-rsvg \
     --with-webp \
-    --with-mailutils
+    --with-mailutils \
+    --with-xwidgets
 
 make -j$(nproc)
 sudo make install
