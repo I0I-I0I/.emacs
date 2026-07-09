@@ -78,14 +78,9 @@
   :init
   (use-package display-line-numbers
     :ensure nil
+    :hook ((text-mode . (lambda () (display-line-numbers-mode -1)))
+           (special-mode . (lambda () (display-line-numbers-mode -1))))
     :config
-    (defun my/display-line-numbers--turn-on-unless-text (orig &rest args)
-      "Turn on line numbers only outside `text-mode' buffers."
-      (unless (derived-mode-p 'text-mode)
-        (apply orig args)))
-
-    (advice-add 'display-line-numbers--turn-on
-                :around #'my/display-line-numbers--turn-on-unless-text)
     (setq display-line-numbers-type 'relative)
     (global-display-line-numbers-mode)
     :bind
@@ -98,7 +93,8 @@
         make-backup-files t
         backup-directory-alist `(("." . ,(expand-file-name "backups/" user-emacs-directory)))
         auto-save-file-name-transforms
-        `((".*" ,(expand-file-name "auto-save-list/" user-emacs-directory) t)))
+        `((".*" ,(expand-file-name "auto-save-list/" user-emacs-directory) t))
+        image-auto-resize 'fit-window)
 
   (when (boundp 'native-comp-async-report-warnings-errors)
     (setq native-comp-async-report-warnings-errors nil))
@@ -164,11 +160,17 @@
   (setq mouse-wheel-scroll-amount '(1 ((shift) . 1))
         mouse-wheel-progressive-speed nil
         mouse-wheel-follow-mouse t
-        scroll-margin 5
+        scroll-margin 0
         scroll-step 1
         scroll-conservatively 10000
+        auto-window-vscroll nil
         fast-but-imprecise-scrolling t
-        scroll-preserve-screen-position t)
+        scroll-preserve-screen-position t
+        mouse-wheel-scroll-amount '(1 ((shift) . 1))
+        mouse-wheel-progressive-speed nil)
+
+  (when (fboundp 'pixel-scroll-precision-mode)
+    (pixel-scroll-precision-mode 1))
 
   (put 'narrow-to-region 'disabled nil)
   (put 'narrow-to-page 'disabled nil)
@@ -493,7 +495,7 @@ kill buffers that are local to the current frame before deleting it."
    ("M-S-<left>" . org-decrease-number-at-point)
    ("C-x m" . global-mode-line-invisible-mode)
    ("C-c L" . my/copy-current-line-number)
-   ("C-x F" . toggle-frame-fullscreen)
+   ("C-x f" . toggle-frame-fullscreen)
    ("C-x 5 n" . my/new-workflow-frame)
    ("C-x 5 p" . my/new-project-frame)
    ("C-x 5 d" . my/change-frame-default-directory)
@@ -559,6 +561,7 @@ kill buffers that are local to the current frame before deleting it."
     (tab-bar-history-mode 1))
   :bind (:map my/override-map
               ("C-M-i" . tab-bar-switch-to-prev-tab)
+              ("<backtab>" . tab-bar-switch-to-prev-tab)
               ("C-M-<tab>" . tab-bar-switch-to-prev-tab)
               ("C-M-o" . tab-bar-switch-to-next-tab)
               ("C-x t l" . my/tab-bar-switch-to-recent-or-prev-tab)))
@@ -875,7 +878,10 @@ With prefix argument KILL, really kill the current buffer."
   (require 'corfu-popupinfo)
   (corfu-history-mode 1)
   (corfu-popupinfo-mode 1)
-  :init (global-corfu-mode))
+  :init (global-corfu-mode)
+  :bind
+  (:map my/override-map
+        ("M-/" . completion-at-point)))
 
 (use-package cape
   :ensure t
@@ -1520,6 +1526,8 @@ With prefix argument NEW, always create a new eshell buffer."
 (use-package pi-coding-agent
   :ensure t
   :preface
+  (require 'cl-lib)
+
   (defvar my/pi-coding-agent-return-tab nil
     "Tab to return to when toggling away from the pi tab.")
 
@@ -1549,14 +1557,42 @@ opened without hiding or toggling the pi buffer."
                      (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs))))
         (tab-bar-switch-to-tab my/pi-coding-agent-return-tab)
       (tab-bar-switch-to-prev-tab)))
-  :config
-  (defun my/pi-coding-agent-resume-without-historical-sort (orig-fun &rest args)
-    "Call ORIG-FUN with completion order preserved for pi resume sessions."
-    (let ((completions-sort nil))
-      (apply orig-fun args)))
 
-  (advice-add 'pi-coding-agent--resume-session-from-directory
-              :around #'my/pi-coding-agent-resume-without-historical-sort)
+  (defun my/pi-coding-agent--sort-session-entries-by-time (entries)
+    "Return pi session ENTRIES sorted newest first."
+    (sort (copy-sequence entries)
+          (lambda (a b)
+            (time-less-p
+             (plist-get (plist-get b :metadata) :modified-time)
+             (plist-get (plist-get a :metadata) :modified-time)))))
+
+  (defun my/pi-coding-agent--preserve-resume-order (orig-fun &rest args)
+    "Call ORIG-FUN without minibuffer completion re-sorting its candidates."
+    (let ((completions-sort nil)
+          (orig-completing-read (symbol-function 'completing-read)))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt collection &rest read-args)
+                   (let ((collection
+                          (if (and (string= prompt "Resume session: ")
+                                   (functionp collection))
+                              (lambda (string pred action)
+                                (if (eq action 'metadata)
+                                    '(metadata
+                                      (display-sort-function . identity)
+                                      (cycle-sort-function . identity))
+                                  (funcall collection string pred action)))
+                            collection)))
+                     (apply orig-completing-read prompt collection read-args)))))
+        (apply orig-fun args))))
+  :config
+  (unless (advice-member-p #'my/pi-coding-agent--sort-session-entries-by-time
+                           'pi-coding-agent--list-session-entries)
+    (advice-add 'pi-coding-agent--list-session-entries
+                :filter-return #'my/pi-coding-agent--sort-session-entries-by-time))
+  (unless (advice-member-p #'my/pi-coding-agent--preserve-resume-order
+                           'pi-coding-agent--resume-session-from-directory)
+    (advice-add 'pi-coding-agent--resume-session-from-directory
+                :around #'my/pi-coding-agent--preserve-resume-order))
   :bind
   ("C-c a" . my/pi-coding-agent-in-tab)
   (:map pi-coding-agent-chat-mode-map
@@ -1598,7 +1634,7 @@ opened without hiding or toggling the pi buffer."
   ("C-c z" . olivetti-mode)
   :custom
   (olivetti-body-width 120)
-  (olivetti-minimum-body-width 100)
+  (olivetti-minimum-body-width 80)
   :hook
   (olivetti-mode . (lambda () (visual-line-mode 1)))
   :config
@@ -1639,10 +1675,40 @@ opened without hiding or toggling the pi buffer."
 
   (dolist (fun '(find-file-read-args ido-expand-directory))
     (advice-add fun :around 'dired-subdir-aware))
+
+  (defun my/save-clipboard-image (file)
+    "Save a PNG image from the Wayland clipboard to FILE."
+    (interactive
+     (list
+      (read-file-name
+       "Save clipboard image to: "
+       (if (derived-mode-p 'dired-mode)
+           (dired-current-directory)
+         default-directory)
+       nil nil
+       (format-time-string "screenshot-%Y%m%d-%H%M%S.png"))))
+    (unless (executable-find "wl-paste")
+      (user-error "wl-paste is not installed"))
+    (let ((file (expand-file-name file)))
+      (when (file-directory-p file)
+        (setq file (expand-file-name
+                    (format-time-string "screenshot-%Y%m%d-%H%M%S.png")
+                    file)))
+      (make-directory (file-name-directory file) t)
+      (unless (zerop (call-process-shell-command
+                      (format "wl-paste --type image/png > %s"
+                              (shell-quote-argument file))))
+        (when (file-exists-p file)
+          (delete-file file))
+        (user-error "Clipboard does not contain a PNG image"))
+      (when (derived-mode-p 'dired-mode)
+        (revert-buffer))
+      (message "Saved clipboard image to %s" file)))
   :bind (:map dired-mode-map
               ("h" . dired-up-directory)
               ("l" . dired-find-file)
-              ("C-u i" . dired-kill-subdir)))
+              ("C-u i" . dired-kill-subdir)
+              ("C-c C-y" . my/save-clipboard-image)))
 
 (use-package dired-clipboard
   :vc (:url "https://github.com/kn66/dired-clipboard.el"
@@ -1744,13 +1810,90 @@ opened without hiding or toggling the pi buffer."
   :init
   (add-hook 'org-agenda-finalize-hook #'org-modern-agenda))
 
+(use-package visual-fill-column
+  :ensure t
+  :custom
+  (visual-fill-column-width 80)
+  (visual-fill-column-center-text t))
+
+(defvar-local my/org-presentation--mode-line-local-p nil)
+(defvar-local my/org-presentation--mode-line-format nil)
+(defvar-local my/org-presentation--tab-line-local-p nil)
+(defvar-local my/org-presentation--tab-line-format nil)
+(defvar-local my/org-presentation--frame nil)
+(defvar-local my/org-presentation--tab-bar-lines nil)
+
+(defun my/org-presentation-center-slide (&rest _)
+  "Center the current org-present slide in the window."
+  (setq-local visual-fill-column-width 80)
+  (setq-local visual-fill-column-center-text t)
+  (when (bound-and-true-p visual-fill-column-mode)
+    (visual-fill-column-adjust))
+  (recenter))
+
+(defun my/org-presentation-start ()
+  "Presentation display tweaks."
+  (setq-local my/org-presentation--mode-line-local-p
+              (local-variable-p 'mode-line-format))
+  (setq-local my/org-presentation--mode-line-format mode-line-format)
+  (setq-local my/org-presentation--tab-line-local-p
+              (local-variable-p 'tab-line-format))
+  (setq-local my/org-presentation--tab-line-format tab-line-format)
+  (setq-local mode-line-format nil)
+  (setq-local tab-line-format nil)
+  (setq-local my/org-presentation--frame (selected-frame))
+  (setq-local my/org-presentation--tab-bar-lines
+              (frame-parameter nil 'tab-bar-lines))
+  (modify-frame-parameters nil '((tab-bar-lines . 0)))
+  (force-mode-line-update)
+  (text-scale-set 3)
+  (visual-line-mode 1)
+  (visual-fill-column-mode 1)
+  (my/org-presentation-center-slide)
+  (org-display-inline-images)
+  (when (fboundp 'org-latex-preview)
+    (org-latex-preview '(16))))
+
+(defun my/org-presentation-end ()
+  "Undo presentation display tweaks."
+  (if my/org-presentation--mode-line-local-p
+      (setq-local mode-line-format my/org-presentation--mode-line-format)
+    (kill-local-variable 'mode-line-format))
+  (if my/org-presentation--tab-line-local-p
+      (setq-local tab-line-format my/org-presentation--tab-line-format)
+    (kill-local-variable 'tab-line-format))
+  (when (frame-live-p my/org-presentation--frame)
+    (modify-frame-parameters
+     my/org-presentation--frame
+     `((tab-bar-lines . ,my/org-presentation--tab-bar-lines))))
+  (force-mode-line-update)
+  (text-scale-set 0)
+  (visual-fill-column-mode -1)
+  (org-remove-inline-images)
+  (when (fboundp 'org-clear-latex-preview)
+    (org-clear-latex-preview)))
+
+(use-package org-present
+  :ensure t
+  :after org
+  :hook ((org-present-mode . my/org-presentation-start)
+         (org-present-mode-quit . my/org-presentation-end))
+  :config
+  (add-hook 'org-present-after-navigate-functions
+            #'my/org-presentation-center-slide)
+  :bind (:map org-mode-map
+              ("C-c p" . org-present)))
+
+(use-package ob-mermaid
+  :ensure t)
+
 (use-package org
   :ensure nil
   :preface
+  (require 'subr-x)
+  (require 'cl-lib)
+  (require 'seq)
   (define-prefix-command 'my/org-prefix-map)
-
-  (defun my/org-confirm-babel-evaluate (lang _body)
-    (not (member lang '("emacs-lisp"))))
 
   (defun my/org-notes-tab-name ()
     "Return the dedicated notes tab name."
@@ -1793,11 +1936,23 @@ Do not create or switch tabs until after the file has been selected."
         (with-temp-buffer (write-file file)))
       file))
 
+  (defvar my/org-todo-default-heading "Inbox"
+    "Default top-level heading for todo captures when the todo file is empty.")
+
+  (defun my/org-normalize-heading-title (heading)
+    "Return a safe one-line Org heading title from HEADING."
+    (let ((title (replace-regexp-in-string
+                  "[[:space:]\n\r]+" " " (string-trim (or heading "")))))
+      (if (string-empty-p title)
+          (user-error "Heading cannot be empty")
+        title)))
+
   (defun my/org-ensure-heading (heading)
     "Ensure a top-level HEADING exists in the current Org buffer.
 Leave point at the beginning of that heading."
-    (goto-char (point-min))
-    (let (found)
+    (let ((heading (my/org-normalize-heading-title heading))
+          found)
+      (goto-char (point-min))
       (while (and (not found) (re-search-forward org-heading-regexp nil t))
         (when (and (= (org-current-level) 1)
                    (string= (org-get-heading t t t t) heading))
@@ -1819,7 +1974,8 @@ Leave point at the beginning of that heading."
          (while (re-search-forward org-heading-regexp nil t)
            (when (= (org-current-level) 1)
              (let ((heading (org-get-heading t t t t)))
-               (unless (org-get-todo-state)
+               (unless (or (org-get-todo-state)
+                           (member heading headings))
                  (push heading headings)))))
          (nreverse headings)))))
 
@@ -1836,11 +1992,137 @@ point on the parent heading; Org then inserts the entry as a child."
   (defun my/org-capture-todo ()
     "Position `org-capture' under a chosen todo title in the todos file."
     (let* ((titles (my/org-todo-title-headings))
-           (title (string-trim
-                   (completing-read "Todo title: " titles nil nil))))
-      (if (string-empty-p title)
-          (user-error "Todo title cannot be empty")
-        (my/org-capture-todo-under-heading title))))
+           (default (or (car titles) my/org-todo-default-heading))
+           (title (my/org-normalize-heading-title
+                   (completing-read
+                    (format "Todo title (default %s): " default)
+                    titles nil nil nil nil default))))
+      (my/org-capture-todo-under-heading title)))
+
+  (defun my/org-confirm-babel-evaluate (lang _body)
+    "Return non-nil when Org should confirm evaluating a LANG block."
+    (not (member lang '("emacs-lisp"))))
+
+  (defvar my/org-mermaid-preview-cache-directory
+    (expand-file-name "org-mermaid-preview/" user-emacs-directory)
+    "Directory for cached Mermaid preview images.")
+
+  (defun my/org-mermaid-preview-clear (&optional beg end)
+    "Remove Mermaid preview overlays between BEG and END."
+    (interactive)
+    (remove-overlays (or beg (point-min)) (or end (point-max))
+                     'my/org-mermaid-preview t))
+
+  (defun my/org-mermaid-preview--params-with-file (params file)
+    "Return Mermaid PARAMS for preview output FILE."
+    (cons (cons :file file)
+          (seq-remove (lambda (param)
+                        (memq (car-safe param) '(:file :results :exports)))
+                      params)))
+
+  (defun my/org-mermaid-preview--output-file (body params)
+    "Return cache file name for Mermaid BODY and PARAMS."
+    (let* ((source-file (cdr (assq :file params)))
+           (extension (or (and source-file (file-name-extension source-file)) "svg"))
+           (hash (secure-hash 'sha1 (prin1-to-string (list body params)))))
+      (expand-file-name (concat hash "." extension)
+                        my/org-mermaid-preview-cache-directory)))
+
+  (defun my/org-mermaid-preview--image (file)
+    "Return an Org-style image descriptor for FILE."
+    (if (fboundp 'org--create-inline-image)
+        (org--create-inline-image file nil)
+      (create-image file)))
+
+  (defun my/org-mermaid-preview--block-at-point ()
+    "Return current Mermaid source block element, or nil."
+    (let ((element (org-element-at-point)))
+      (when (and (eq (org-element-type element) 'src-block)
+                 (string= (org-element-property :language element) "mermaid"))
+        element)))
+
+  (defun my/org-mermaid-preview--display-end (element)
+    "Return end position for previewing ELEMENT without hiding following blank lines."
+    (- (org-element-property :end element)
+       (or (org-element-property :post-blank element) 0)))
+
+  (defun my/org-mermaid-preview--render-block (element)
+    "Render Mermaid source block ELEMENT as an overlay replacing the block."
+    (require 'ob-mermaid)
+    (let* ((begin (org-element-property :begin element))
+           (end (my/org-mermaid-preview--display-end element))
+           (info (save-excursion
+                   (goto-char begin)
+                   (org-babel-get-src-block-info)))
+           (body (nth 1 info))
+           (params (nth 2 info))
+           (file (my/org-mermaid-preview--output-file body params)))
+      (make-directory my/org-mermaid-preview-cache-directory t)
+      (unless (file-exists-p file)
+        (org-babel-execute:mermaid
+         body
+         (my/org-mermaid-preview--params-with-file params file)))
+      (my/org-mermaid-preview-clear begin end)
+      (let ((overlay (make-overlay begin end nil t nil)))
+        (overlay-put overlay 'my/org-mermaid-preview t)
+        (overlay-put overlay 'display (my/org-mermaid-preview--image file))
+        (overlay-put overlay 'help-echo "Mermaid preview. C-c C-x C-m toggles source.")
+        overlay)))
+
+  (defun my/org-mermaid-preview-at-point ()
+    "Toggle Mermaid source block preview at point."
+    (interactive)
+    (let* ((element (my/org-mermaid-preview--block-at-point))
+           (begin (and element (org-element-property :begin element)))
+           (end (and element (my/org-mermaid-preview--display-end element))))
+      (unless element
+        (user-error "Point is not on a Mermaid source block"))
+      (if (cl-some (lambda (overlay)
+                     (overlay-get overlay 'my/org-mermaid-preview))
+                   (overlays-in begin end))
+          (my/org-mermaid-preview-clear begin end)
+        (my/org-mermaid-preview--render-block element))))
+
+  (defun my/org-mermaid-preview-available-p ()
+    "Return non-nil when Mermaid previews can be rendered."
+    (or (and (boundp 'ob-mermaid-cli-path) ob-mermaid-cli-path)
+        (executable-find "mmdc")))
+
+  (defun my/org-mermaid-preview-buffer ()
+    "Render all Mermaid source blocks in the current Org buffer as previews."
+    (interactive)
+    (unless (my/org-mermaid-preview-available-p)
+      (user-error "mmdc not found; set `ob-mermaid-cli-path' or install mermaid-cli"))
+    (my/org-mermaid-preview-clear)
+    (org-with-wide-buffer
+     (org-element-map (org-element-parse-buffer) 'src-block
+       (lambda (element)
+         (when (string= (org-element-property :language element) "mermaid")
+           (my/org-mermaid-preview--render-block element))))))
+
+  (defvar-local my/org-mermaid-preview-timer nil
+    "Idle timer used to debounce automatic Mermaid preview rendering.")
+
+  (defun my/org-mermaid-preview-buffer-later ()
+    "Render Mermaid previews in the current Org buffer after Emacs becomes idle."
+    (when (timerp my/org-mermaid-preview-timer)
+      (cancel-timer my/org-mermaid-preview-timer))
+    (let ((buffer (current-buffer)))
+      (setq my/org-mermaid-preview-timer
+            (run-with-idle-timer
+             0.5 nil
+             (lambda ()
+               (when (and (buffer-live-p buffer)
+                          (my/org-mermaid-preview-available-p))
+                 (with-current-buffer buffer
+                   (when (derived-mode-p 'org-mode)
+                     (ignore-errors
+                       (my/org-mermaid-preview-buffer))))))))))
+
+  (defun my/org-mermaid-preview-setup-auto-render ()
+    "Automatically render Mermaid previews when opening or saving Org buffers."
+    (my/org-mermaid-preview-buffer-later)
+    (add-hook 'after-save-hook #'my/org-mermaid-preview-buffer-later nil t))
   :init
   (global-set-key (kbd "C-z") my/org-prefix-map)
 
@@ -1858,13 +2140,15 @@ point on the parent heading; Org then inserts the entry as a child."
   :hook
   ((org-mode . visual-line-mode)
    (org-mode . variable-pitch-mode)
-   (org-mode . org-indent-mode))
+   (org-mode . org-indent-mode)
+   (org-mode . my/org-mermaid-preview-setup-auto-render))
   :custom
   ;; Editing
   (org-log-done 'time)
   (org-log-into-drawer t)
   (org-insert-heading-respect-content t)
   (org-M-RET-may-split-line '((default . nil)))
+  (org-image-actual-width nil)
 
   (org-startup-indented t)
   (org-hide-emphasis-markers t)
@@ -1901,7 +2185,7 @@ point on the parent heading; Org then inserts the entry as a child."
   (org-capture-templates
    `(("t" "Todo" entry
       (file+function ,(my/org-todo-file) my/org-capture-todo)
-      "* TODO %?\n")
+      "* TODO %?\n %i\n")
      ("i" "Inbox task" entry
       (file "inbox.org")
       "* TODO %?\n")))
@@ -1909,14 +2193,24 @@ point on the parent heading; Org then inserts the entry as a child."
                                         ; (org-preview-latex-default-process 'dvipng)
   (org-preview-latex-default-process 'dvisvgm)
   (org-format-latex-options
-   (plist-put org-format-latex-options :scale 1.6))
+   (plist-put org-format-latex-options :scale 2.0))
+  (ob-mermaid-cli-path "mmdc")
 
   :config
+  (setq org-babel-default-header-args:mermaid
+        '((:results . "file graphics silent") (:exports . "none")))
   (org-babel-do-load-languages
    'org-babel-load-languages
    '((emacs-lisp . t)
+     (shell . t)
      (python . t)
-     (shell . t)))
+     (latex . t)
+     (mermaid . t)))
+  (add-hook 'org-babel-after-execute-hook #'org-display-inline-images)
+  (add-hook 'org-babel-after-execute-hook
+            (lambda ()
+              (when (derived-mode-p 'org-mode)
+                (my/org-mermaid-preview-buffer-later))))
   :bind
   (:map my/org-prefix-map
         ("a" . org-agenda)
@@ -1924,7 +2218,52 @@ point on the parent heading; Org then inserts the entry as a child."
         ("n" . my/org-find-note-in-tab)
         ("T" . org-todo-list)
         :map org-mode-map
-        ("C-c C-d" . org-deadline)))
+        ("C-c C-d" . org-deadline)
+        ("C-c C-x C-m" . my/org-mermaid-preview-at-point)
+        ("C-c C-x M" . my/org-mermaid-preview-buffer)))
+
+(use-package org-embed
+  :vc (:url "https://github.com/yibie/org-embed"
+            :rev :newest
+            :branch "main")
+  :after org
+  :demand t
+  :preface
+  (define-prefix-command 'my/org-embed-prefix-map)
+
+  (defun my/org-embed-disable-conflicting-modes (&rest _)
+    "Disable Org display modes that can conflict with xwidget embeds."
+    (when (bound-and-true-p org-modern-mode)
+      (org-modern-mode -1)))
+  :custom
+  (org-embed-video-width 800)
+  (org-embed-video-height 450)
+  (org-embed-webpage-width 1024)
+  (org-embed-webpage-height 768)
+  (org-embed-pdf-width 800)
+  (org-embed-pdf-height 1000)
+  :config
+  (unless (fboundp 'xwidget-webkit-new-session)
+    (message "org-embed requires Emacs with xwidget-webkit support"))
+  ;; org-embed's xwidgets may not display correctly with org-modern enabled.
+  (dolist (fn '(org-embed-video
+                org-embed-local-video
+                org-embed-webpage
+                org-embed-pdf
+                org-embed-follow-link))
+    (advice-add fn :before #'my/org-embed-disable-conflicting-modes))
+  :bind
+  (:map my/org-prefix-map
+        ("e" . my/org-embed-prefix-map)
+        :map my/org-embed-prefix-map
+        ("v" . org-embed-video)
+        ("V" . org-embed-local-video)
+        ("w" . org-embed-webpage)
+        ("p" . org-embed-pdf)
+        ("c" . org-embed-clean-at-point)
+        ("C" . org-embed-clean-all)
+        :map org-mode-map
+        ("C-c e" . my/org-embed-prefix-map)))
 
 ;; LSP
 
