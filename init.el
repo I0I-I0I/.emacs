@@ -1,5 +1,9 @@
 ;;; init.el --- Emacs init -*- lexical-binding: t; no-byte-compile: t; -*-
 
+;;; Header
+
+;;; Early startup and custom file
+
 (setq custom-file (expand-file-name "custom.el" user-emacs-directory))
 (load custom-file 'noerror)
 
@@ -7,10 +11,10 @@
 (add-to-list 'default-frame-alist '(undecorated . t))
 (set-frame-parameter nil 'undecorated t)
 
-(defvar my/gc-cons-threshold-orig gc-cons-threshold)
-(defvar my/gc-cons-percentage-orig gc-cons-percentage)
 
-;; Fix encoding
+;;; Encoding and environment
+
+;; UTF-8 defaults
 (defun my/revert-buffer-utf8 ()
   "Revert current buffer using UTF-8 (unix) without confirmation."
   (interactive)
@@ -18,14 +22,14 @@
         (coding-system-for-write 'utf-8-unix))
     (revert-buffer :ignore-auto :noconfirm)))
 
-(global-set-key (kbd "C-c u") #'my/revert-buffer-utf8)
+(keymap-global-set "C-c u" #'my/revert-buffer-utf8)
 
 (prefer-coding-system 'utf-8)
 (set-language-environment "UTF-8")
 (set-default-coding-systems 'utf-8)
 (setq-default buffer-file-coding-system 'utf-8-unix)
 
-;; Set PATH
+;; PATH helpers
 (defun my/add-to-path (dir)
   (let ((path (expand-file-name dir)))
     (when (file-directory-p path)
@@ -38,13 +42,13 @@
 
 (my/add-to-path "~/.emacs.d/mason/bin")
 
-;;; windows specific
+;; Windows-specific PATH entries
 (when (eq system-type 'windows-nt)
   (my/add-to-path "C:/Program Files/Git/usr/bin")
   (my/add-to-path "D:/apps/texlive/2026/bin/windows")
   (my/add-to-path "D:/apps/vips/bin"))
 
-;;; Override map
+;;; Global override keymap
 (defvar my/override-map (make-sparse-keymap))
 (define-minor-mode my/override-mode
   "Highest priority keymap."
@@ -52,7 +56,7 @@
   :keymap my/override-map)
 (my/override-mode 1)
 
-;; Package and use-package
+;;; Package bootstrap
 (require 'package)
 
 (setq package-archives
@@ -71,20 +75,19 @@
 (setq use-package-always-ensure t
       use-package-verbose nil)
 
-;; Core
+;;; Core Emacs defaults
 (use-package emacs
   :ensure nil
   :demand t
   :init
   (use-package display-line-numbers
     :ensure nil
-    :hook ((text-mode . (lambda () (display-line-numbers-mode -1)))
-           (special-mode . (lambda () (display-line-numbers-mode -1))))
+    :hook ((prog-mode . display-line-numbers-mode)
+           (conf-mode . display-line-numbers-mode))
     :config
     (setq display-line-numbers-type 'relative)
-    (global-display-line-numbers-mode)
     :bind
-    ("C-x L" . global-display-line-numbers-mode))
+    ("C-x L" . display-line-numbers-mode))
 
   (setq gc-cons-threshold (* 64 1024 1024)
         gc-cons-percentage 0.1
@@ -101,10 +104,6 @@
   (when (boundp 'native-comp-deferred-compilation)
     (setq native-comp-deferred-compilation t))
 
-  (add-hook 'emacs-startup-hook
-            (lambda ()
-              (setq gc-cons-threshold (* 16 1024 1024)
-                    gc-cons-percentage 0.1)))
 
   (setq-default fill-column 1000
                 indent-tabs-mode nil
@@ -146,14 +145,15 @@
   (setq auto-revert-verbose nil)
 
   (global-visual-line-mode 1)
-  (defun my-disable-visual-line-and-truncate ()
-    (when (bound-and-true-p visual-line-mode) (visual-line-mode -1))
-    (when (bound-and-true-p truncate-lines) (toggle-truncate-lines)))
+  (defun my/disable-visual-line-and-truncate ()
+    "Disable visual wrapping and enable line truncation in the current buffer."
+    (visual-line-mode -1)
+    (setq-local truncate-lines t))
 
-  (add-hook 'ibuffer-mode-hook 'my-disable-visual-line-and-truncate)
-  (add-hook 'buffer-menu-mode-hook 'my-disable-visual-line-and-truncate)
+  (add-hook 'ibuffer-mode-hook #'my/disable-visual-line-and-truncate)
+  (add-hook 'buffer-menu-mode-hook #'my/disable-visual-line-and-truncate)
 
-  (fset 'yes-or-no-p 'y-or-n-p)
+  (setq use-short-answers t)
   (setq savehist-additional-variables '(register-alist))
   (savehist-mode 1)
 
@@ -165,9 +165,7 @@
         scroll-conservatively 10000
         auto-window-vscroll nil
         fast-but-imprecise-scrolling t
-        scroll-preserve-screen-position t
-        mouse-wheel-scroll-amount '(1 ((shift) . 1))
-        mouse-wheel-progressive-speed nil)
+        scroll-preserve-screen-position t)
 
   (when (fboundp 'pixel-scroll-precision-mode)
     (pixel-scroll-precision-mode 1))
@@ -272,8 +270,7 @@
   (defun my/new-project-frame--tab-name (directory)
     "Return a tab name for project DIRECTORY."
     (let* ((directory (file-name-as-directory (expand-file-name directory)))
-           (existing-tab-names (mapcar (lambda (tab) (alist-get 'name tab))
-                                       (tab-bar-tabs))))
+           (existing-tab-names (my/tab-bar-tab-names)))
       (or (when (boundp 'tabspaces-project-tab-map)
             (cdr (assoc directory tabspaces-project-tab-map)))
           (when (fboundp 'tabspaces-generate-descriptive-tab-name)
@@ -457,7 +454,7 @@ kill buffers that are local to the current frame before deleting it."
 
 
   ;; Vim-like C-r C-w for minibuffer prompts.
-  (defun my-minibuffer-insert-symbol-at-point ()
+  (defun my/minibuffer-insert-symbol-at-point ()
     "Insert the symbol at point from the buffer that opened the minibuffer."
     (interactive)
     (let* ((window (minibuffer-selected-window))
@@ -512,15 +509,15 @@ kill buffers that are local to the current frame before deleting it."
    ("C-x B" . switch-to-buffer-other-window)
    ("C-x k" . kill-current-buffer)
    :map minibuffer-local-map
-   ("M-l" . my-minibuffer-insert-symbol-at-point)
+   ("M-l" . my/minibuffer-insert-symbol-at-point)
    :map minibuffer-local-ns-map
-   ("M-l" . my-minibuffer-insert-symbol-at-point)
+   ("M-l" . my/minibuffer-insert-symbol-at-point)
    :map minibuffer-local-completion-map
-   ("M-l" . my-minibuffer-insert-symbol-at-point)
+   ("M-l" . my/minibuffer-insert-symbol-at-point)
    :map minibuffer-local-must-match-map
-   ("M-l" . my-minibuffer-insert-symbol-at-point)))
+   ("M-l" . my/minibuffer-insert-symbol-at-point)))
 
-;; Tabs
+;;; Frames, tabs, and workspaces
 (use-package tab-bar
   :ensure nil
   :demand t
@@ -670,15 +667,18 @@ With prefix argument KILL, really kill the current buffer."
               ("C-x t r" . tabspaces-remove-current-buffer)
               ("C-x t k" . tabspaces-close-workspace)))
 
+(defun my/tab-bar-tab-names ()
+  "Return names of current frame's tab-bar tabs."
+  (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs)))
+
+(defun my/directory-name (directory)
+  "Return the final path component of DIRECTORY."
+  (file-name-nondirectory
+   (directory-file-name (file-name-as-directory (expand-file-name directory)))))
+
 (defun my/project-tab-name (prefix)
   "Return PREFIX plus the current project/directory name."
-  (format "%s: %s"
-          prefix
-          (or (when-let* ((project (project-current nil)))
-                (file-name-nondirectory
-                 (directory-file-name (project-root project))))
-              (file-name-nondirectory
-               (directory-file-name default-directory)))))
+  (format "%s: %s" prefix (my/project-or-cwd-name default-directory)))
 
 (defun my/current-tab-name ()
   "Return the current tab-bar tab name."
@@ -687,7 +687,7 @@ With prefix argument KILL, really kill the current buffer."
 (defun my/switch-to-named-tab (name)
   "Switch to tab-bar tab NAME, creating it when needed."
   (let ((directory default-directory))
-    (if (member name (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs)))
+    (if (member name (my/tab-bar-tab-names))
         (tab-bar-switch-to-tab name)
       ;; Do not let new tabspaces inherit the current buffer from the
       ;; previous tab; start them on *scratch*, but keep the caller's cwd so
@@ -701,6 +701,36 @@ With prefix argument KILL, really kill the current buffer."
                  buffer))))
         (tab-bar-new-tab))
       (tab-bar-rename-tab name))))
+
+(defun my/with-dedicated-tab (tab-name return-tab-symbol body-fn &optional reset-new-tab inhibit-return return-predicate)
+  "Switch to TAB-NAME or back to remembered tab, then call BODY-FN.
+RETURN-TAB-SYMBOL stores the previous tab name.  BODY-FN is called with one
+argument, non-nil when TAB-NAME was newly created.  If RESET-NEW-TAB is non-nil,
+reset windows and the frame buffer list for a newly-created tab.  If
+INHIBIT-RETURN is non-nil, do not toggle back from TAB-NAME.  If RETURN-PREDICATE
+is non-nil, return only when it returns non-nil."
+  (let* ((current-tab (my/current-tab-name))
+         (tab-names (my/tab-bar-tab-names))
+         (tab-exists (member tab-name tab-names))
+         (return-tab (and (boundp return-tab-symbol)
+                          (symbol-value return-tab-symbol))))
+    (if (and (not inhibit-return)
+             (string= current-tab tab-name)
+             (or (null return-predicate) (funcall return-predicate))
+             return-tab
+             (member return-tab tab-names))
+        (tab-bar-switch-to-tab return-tab)
+      (unless (string= current-tab tab-name)
+        (set return-tab-symbol current-tab))
+      (my/switch-to-named-tab tab-name)
+      (when (and reset-new-tab (not tab-exists))
+        (delete-other-windows)
+        (set-frame-parameter nil 'buffer-list nil))
+      (funcall body-fn (not tab-exists))
+      (when (and reset-new-tab (not tab-exists))
+        (set-frame-parameter nil 'buffer-list (list (current-buffer)))))))
+
+;;; Editing basics
 
 (use-package crux
   :ensure t
@@ -740,7 +770,9 @@ With prefix argument KILL, really kill the current buffer."
          :map dired-mode-map
          ("z" . crux-open-with)))
 
-;;; Font
+;;; UI and appearance
+
+;; Fonts and ligatures
 (use-package ligature
   :config
   (ligature-set-ligatures 't '("==" "!=" "===" "!==" "&&" "||" "!!" ">>" "<<"))
@@ -761,6 +793,8 @@ With prefix argument KILL, really kill the current buffer."
   (when (display-graphic-p)
     (fontaine-mode t)
     (fontaine-set-preset 'maple-mono)))
+
+;;; Buffers and windows
 
 ;; Mode line
 (defvar my/mode-line-extra-format nil
@@ -800,19 +834,19 @@ With prefix argument KILL, really kill the current buffer."
    my/mode-line-extra-format
    mode-line-end-spaces))
 
-;;; Which key
+;; Which-key
 (use-package which-key
   :ensure t
   :config
   (which-key-mode 1))
 
-;;; Editor config
+;; EditorConfig
 (use-package editorconfig
   :ensure t
   :config
   (editorconfig-mode 1))
 
-;;; Spelling
+;; Spelling
 (use-package jinx
   :ensure t
   :hook (emacs-startup . global-jinx-mode)
@@ -836,7 +870,7 @@ With prefix argument KILL, really kill the current buffer."
       (file-error
        (message "Could not start Emacs server: %s" (error-message-string err))))))
 
-;; Grep
+;;; Search and grep
 (use-package wgrep
   :ensure t)
 
@@ -851,7 +885,7 @@ With prefix argument KILL, really kill the current buffer."
   (rg-enable-default-bindings)
   (rg-enable-menu))
 
-;; Surround
+;;; Surround editing
 
 (use-package emacs-surround
   :vc (:url "https://github.com/ganmacs/emacs-surround"
@@ -859,7 +893,7 @@ With prefix argument KILL, really kill the current buffer."
             :branch "master")
   :bind ("C-q" . emacs-surround))
 
-;; Completion
+;;; Completion and minibuffer
 (use-package corfu
   :ensure t
   :hook
@@ -909,7 +943,7 @@ With prefix argument KILL, really kill the current buffer."
   (completions-highlight-face 'completions-highlight)
   (completion-auto-help 'visible))
 
-;; Theme
+;;; Theme
 
 (use-package lambda-themes
   :vc (:url "https://github.com/Lambda-Emacs/lambda-themes"
@@ -922,7 +956,7 @@ With prefix argument KILL, really kill the current buffer."
         lambda-themes-set-variable-pitch t)
   (load-theme 'lambda-dark t))
 
-;; IBuffer
+;;; IBuffer
 (use-package ibuffer
   :ensure nil
   :hook (ibuffer-mode . my/ibuffer-setup-frame-groups)
@@ -1013,7 +1047,7 @@ With prefix argument KILL, really kill the current buffer."
   (add-to-list 'backup-directory-alist
                (cons tramp-file-name-regexp "~/.emacs.d/tramp-backups/")))
 
-;; Eshell
+;;; Shells and terminals
 (use-package vterm
   :ensure t
   :commands (vterm)
@@ -1066,30 +1100,17 @@ With prefix argument KILL, really kill the current buffer."
     "Open/toggle vterm in a dedicated project tab.
 With prefix argument NEW, always create a new vterm buffer."
     (interactive "P")
-    (let* ((dir (my/vterm--project-dir))
-           (vterm-tab (my/vterm-tab-name))
-           (current-tab (my/current-tab-name))
-           (tab-names (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs)))
-           (tab-exists (member vterm-tab tab-names)))
-      (if (and (not new)
-               (string= current-tab vterm-tab)
-               my/vterm-return-tab
-               (member my/vterm-return-tab tab-names))
-          (tab-bar-switch-to-tab my/vterm-return-tab)
-        (unless (string= current-tab vterm-tab)
-          (setq my/vterm-return-tab current-tab))
-        (my/switch-to-named-tab vterm-tab)
-        (unless tab-exists
-          (delete-other-windows)
-          (set-frame-parameter nil 'buffer-list nil))
-        (let ((buf (and (not new) (my/vterm--find-by-dir dir))))
-          (if buf
-              (switch-to-buffer buf)
-            (my/vterm--new-in-dir dir)))
-        (setq-local my/vterm-tab-name vterm-tab)
-        (unless tab-exists
-          (set-frame-parameter nil 'buffer-list (list (current-buffer)))))))
-  :hook (vterm-mode . (lambda () (display-line-numbers-mode -1)))
+    (let ((dir (my/vterm--project-dir))
+          (vterm-tab (my/vterm-tab-name)))
+      (my/with-dedicated-tab
+       vterm-tab 'my/vterm-return-tab
+       (lambda (_new-tab)
+         (let ((buf (and (not new) (my/vterm--find-by-dir dir))))
+           (if buf
+               (switch-to-buffer buf)
+             (my/vterm--new-in-dir dir)))
+         (setq-local my/vterm-tab-name vterm-tab))
+       t new)))
   :bind ("C-c t" . my/vterm-in-tab))
 
 (use-package eshell
@@ -1142,28 +1163,16 @@ With prefix argument NEW, always create a new vterm buffer."
   (defun my/eshell--open-in-tab (dir &optional new)
     "Open/toggle eshell for DIR in a dedicated project tab.
 With NEW, always create a new eshell buffer."
-    (let* ((eshell-tab (my/eshell-tab-name))
-           (current-tab (my/current-tab-name))
-           (tab-names (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs)))
-           (tab-exists (member eshell-tab tab-names)))
-      (if (and (not new)
-               (string= current-tab eshell-tab)
-               my/eshell-return-tab
-               (member my/eshell-return-tab tab-names))
-          (tab-bar-switch-to-tab my/eshell-return-tab)
-        (unless (string= current-tab eshell-tab)
-          (setq my/eshell-return-tab current-tab))
-        (my/switch-to-named-tab eshell-tab)
-        (unless tab-exists
-          (delete-other-windows)
-          (set-frame-parameter nil 'buffer-list nil))
-        (let ((buf (and (not new) (my/eshell--find-by-dir dir))))
-          (if buf
-              (switch-to-buffer buf)
-            (my/eshell--new-in-dir dir)))
-        (setq-local my/eshell-tab-name eshell-tab)
-        (unless tab-exists
-          (set-frame-parameter nil 'buffer-list (list (current-buffer)))))))
+    (let ((eshell-tab (my/eshell-tab-name)))
+      (my/with-dedicated-tab
+       eshell-tab 'my/eshell-return-tab
+       (lambda (_new-tab)
+         (let ((buf (and (not new) (my/eshell--find-by-dir dir))))
+           (if buf
+               (switch-to-buffer buf)
+             (my/eshell--new-in-dir dir)))
+         (setq-local my/eshell-tab-name eshell-tab))
+       t new)))
 
   (defun my/toggle-eshell-here (&optional new)
     "Open/toggle eshell for the current directory in a dedicated tab.
@@ -1198,8 +1207,6 @@ With prefix argument NEW, always create a new eshell buffer."
               (delete-region bol (point))
               (insert choice)))))))
 
-  :hook (eshell-mode . (lambda ()
-                         (display-line-numbers-mode -1)))
   :init
   (use-package eat
     :ensure t
@@ -1299,6 +1306,8 @@ With prefix argument NEW, always create a new eshell buffer."
 
   (add-hook 'eshell-mode-hook #'my/eshell-setup-keymaps))
 
+;;; Undo and version control
+
 ;; Undo
 (use-package undo-fu
   :init
@@ -1335,25 +1344,19 @@ With prefix argument NEW, always create a new eshell buffer."
     (let ((name (or tab-name my/magit-tab-name (my/magit-tab-name))))
       (when (and name
                  (> (length (tab-bar-tabs)) 1)
-                 (member name (mapcar (lambda (tab) (alist-get 'name tab))
-                                      (tab-bar-tabs))))
+                 (member name (my/tab-bar-tab-names)))
         (tab-bar-close-tab-by-name name))))
 
   (defun my/magit-status-in-tab ()
     "Open/toggle `magit-status' in a dedicated project tab."
     (interactive)
-    (let ((magit-tab (my/magit-tab-name))
-          (current-tab (my/current-tab-name)))
-      (if (and (string= current-tab magit-tab)
-               (derived-mode-p 'magit-mode)
-               my/magit-return-tab
-               (member my/magit-return-tab
-                       (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs))))
-          (tab-bar-switch-to-tab my/magit-return-tab)
-        (setq my/magit-return-tab current-tab)
-        (my/switch-to-named-tab magit-tab)
-        (call-interactively #'magit-status)
-        (setq-local my/magit-tab-name magit-tab))))
+    (let ((magit-tab (my/magit-tab-name)))
+      (my/with-dedicated-tab
+       magit-tab 'my/magit-return-tab
+       (lambda (_new-tab)
+         (call-interactively #'magit-status)
+         (setq-local my/magit-tab-name magit-tab))
+       nil nil (lambda () (derived-mode-p 'magit-mode)))))
 
   (defun my/magit-quit-and-close-tab ()
     "Quit Magit and close its dedicated tab."
@@ -1408,7 +1411,9 @@ With prefix argument NEW, always create a new eshell buffer."
             :branch "master")
   :bind (("C-x v t" . git-timemachine)))
 
-;; Treesitter
+;;; Project/dev tooling
+
+;; Tree-sitter
 (setq treesit-language-source-alist
       '((elisp "https://github.com/Wilfred/tree-sitter-elisp")
         (svelte "https://github.com/tree-sitter-grammars/tree-sitter-svelte")))
@@ -1430,12 +1435,12 @@ With prefix argument NEW, always create a new eshell buffer."
   :config
   (global-treesit-auto-mode))
 
-;; Selection
+;;; Selection and navigation
 (use-package expreg
   :bind (("M-h" . expreg-expand)
          ("M-H" . expreg-contract)))
 
-;; Multi cursors
+;; Multiple cursors
 (use-package multiple-cursors
   :vc (:url "https://github.com/magnars/multiple-cursors.el"
             :rev :newest
@@ -1453,7 +1458,7 @@ With prefix argument NEW, always create a new eshell buffer."
          ("C-c M-n" . mc/mark-all-like-this)
          ("C-c C-a" . mc/edit-lines)))
 
-;; Jump
+;; Jump navigation
 (use-package avy
   :vc (:url "https://github.com/abo-abo/avy"
             :rev :newest
@@ -1515,7 +1520,7 @@ With prefix argument NEW, always create a new eshell buffer."
   :ensure t
   :bind ("C-c C-d" . docker))
 
-;; AI
+;;; AI tools
 (use-package copilot
   :ensure t
   :bind (("C-c A" . copilot-mode)
@@ -1537,24 +1542,17 @@ With prefix argument NEW, always create a new eshell buffer."
 When invoked from the pi tab, switch back to the tab from which pi was
 opened without hiding or toggling the pi buffer."
     (interactive)
-    (let ((pi-tab (my/project-tab-name "pi"))
-          (current-tab (my/current-tab-name)))
-      (if (and (string= current-tab pi-tab)
-               my/pi-coding-agent-return-tab
-               (member my/pi-coding-agent-return-tab
-                       (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs))))
-          (tab-bar-switch-to-tab my/pi-coding-agent-return-tab)
-        (unless (string= current-tab pi-tab)
-          (setq my/pi-coding-agent-return-tab current-tab))
-        (my/switch-to-named-tab pi-tab)
-        (call-interactively #'pi-coding-agent))))
+    (my/with-dedicated-tab
+     (my/project-tab-name "pi") 'my/pi-coding-agent-return-tab
+     (lambda (_new-tab)
+       (call-interactively #'pi-coding-agent))))
 
   (defun my/pi-coding-agent-return-tab ()
     "Switch back from the pi tab without hiding the pi buffer."
     (interactive)
     (if (and my/pi-coding-agent-return-tab
              (member my/pi-coding-agent-return-tab
-                     (mapcar (lambda (tab) (alist-get 'name tab)) (tab-bar-tabs))))
+                     (my/tab-bar-tab-names)))
         (tab-bar-switch-to-tab my/pi-coding-agent-return-tab)
       (tab-bar-switch-to-prev-tab)))
 
@@ -1619,7 +1617,7 @@ opened without hiding or toggling the pi buffer."
 ;;          ("C-c C-c" . shell-maker-submit)
 ;;          ("C-c C-k" . agent-shell-interrupt)))
 
-;; Zen mode
+;;; Zen mode
 ;; (use-package sublimity
 ;;   :ensure t
 ;;   :config
@@ -1649,12 +1647,11 @@ opened without hiding or toggling the pi buffer."
 
   (global-olivetti-mode 1))
 
-;; Dired
+;;; Files and Dired
 (use-package dired
   :ensure nil
   :hook
   (dired-mode . dired-omit-mode)
-  (dired-mode . (lambda () (display-line-numbers-mode -1)))
   :custom
   (dired-omit-files (rx string-start (or "." "..") string-end))
   (dired-isearch-filenames 'dwim)
@@ -1738,7 +1735,7 @@ opened without hiding or toggling the pi buffer."
   :bind (:map dired-mode-map
               ("C-c C-p" . dired-preview-mode)))
 
-;; Desktop session persistence
+;;; Sessions and persistence
 
 (use-package desktop
   :ensure nil
@@ -1765,7 +1762,7 @@ opened without hiding or toggling the pi buffer."
   (unless noninteractive
     (desktop-save-mode 1)))
 
-;; Org mode
+;;; Org mode
 (use-package org-tempo
   :ensure nil)
 
@@ -1915,9 +1912,7 @@ Do not create or switch tabs until after the file has been selected."
     (interactive)
     (let ((file (my/org-read-note-file))
           (notes-tab (my/org-notes-tab-name)))
-      (let ((tab-exists (member notes-tab
-                                (mapcar (lambda (tab) (alist-get 'name tab))
-                                        (tab-bar-tabs)))))
+      (let ((tab-exists (member notes-tab (my/tab-bar-tab-names))))
         (my/switch-to-named-tab notes-tab)
         (unless tab-exists
           (when (fboundp 'tabspaces-reset-buffer-list)
@@ -2124,7 +2119,7 @@ point on the parent heading; Org then inserts the entry as a child."
     (my/org-mermaid-preview-buffer-later)
     (add-hook 'after-save-hook #'my/org-mermaid-preview-buffer-later nil t))
   :init
-  (global-set-key (kbd "C-z") my/org-prefix-map)
+  (keymap-global-set "C-z" my/org-prefix-map)
 
   (use-package calendar
     :ensure nil
@@ -2222,50 +2217,12 @@ point on the parent heading; Org then inserts the entry as a child."
         ("C-c C-x C-m" . my/org-mermaid-preview-at-point)
         ("C-c C-x M" . my/org-mermaid-preview-buffer)))
 
-(use-package org-embed
-  :vc (:url "https://github.com/yibie/org-embed"
-            :rev :newest
-            :branch "main")
-  :after org
-  :demand t
-  :preface
-  (define-prefix-command 'my/org-embed-prefix-map)
-
-  (defun my/org-embed-disable-conflicting-modes (&rest _)
-    "Disable Org display modes that can conflict with xwidget embeds."
-    (when (bound-and-true-p org-modern-mode)
-      (org-modern-mode -1)))
-  :custom
-  (org-embed-video-width 800)
-  (org-embed-video-height 450)
-  (org-embed-webpage-width 1024)
-  (org-embed-webpage-height 768)
-  (org-embed-pdf-width 800)
-  (org-embed-pdf-height 1000)
-  :config
-  (unless (fboundp 'xwidget-webkit-new-session)
-    (message "org-embed requires Emacs with xwidget-webkit support"))
-  ;; org-embed's xwidgets may not display correctly with org-modern enabled.
-  (dolist (fn '(org-embed-video
-                org-embed-local-video
-                org-embed-webpage
-                org-embed-pdf
-                org-embed-follow-link))
-    (advice-add fn :before #'my/org-embed-disable-conflicting-modes))
+(use-package toc-org
+  :ensure t
   :bind
-  (:map my/org-prefix-map
-        ("e" . my/org-embed-prefix-map)
-        :map my/org-embed-prefix-map
-        ("v" . org-embed-video)
-        ("V" . org-embed-local-video)
-        ("w" . org-embed-webpage)
-        ("p" . org-embed-pdf)
-        ("c" . org-embed-clean-at-point)
-        ("C" . org-embed-clean-all)
-        :map org-mode-map
-        ("C-c e" . my/org-embed-prefix-map)))
+  ("C-c i t" . toc-org-insert-toc))
 
-;; LSP
+;;; LSP and language modes
 
 (use-package mason
   :ensure t
@@ -2476,7 +2433,7 @@ view."
   :ensure t
   :defer t)
 
-;; RSS
+;;; RSS and miscellaneous packages
 
 (use-package elfeed
   :ensure t
