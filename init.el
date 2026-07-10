@@ -40,10 +40,17 @@
         (unless (member path parts)
           (setenv "PATH" (mapconcat #'identity (cons path parts) path-separator)))))))
 
-(my/add-to-path "~/.emacs.d/mason/bin")
+;; On GNU/Linux and macOS, `exec-path-from-shell' imports PATH below.
+;; Keep explicit additions only for Windows, where that package is not useful.
 
 ;; Windows-specific PATH entries
 (when (eq system-type 'windows-nt)
+  (my/add-to-path "~/.emacs.d/mason/bin")
+  (my/add-to-path "~/.cargo/bin")
+  (when-let* ((appdata (getenv "APPDATA")))
+    (my/add-to-path (expand-file-name "npm" appdata)))
+  (when-let* ((localappdata (getenv "LOCALAPPDATA")))
+    (my/add-to-path (expand-file-name "pnpm" localappdata)))
   (my/add-to-path "C:/Program Files/Git/usr/bin")
   (my/add-to-path "D:/apps/texlive/2026/bin/windows")
   (my/add-to-path "D:/apps/vips/bin"))
@@ -74,6 +81,17 @@
 (require 'use-package)
 (setq use-package-always-ensure t
       use-package-verbose nil)
+
+;; Import PATH and related environment from the user's login shell.
+;; This is especially important for daemon sessions started by systemd/launchd,
+;; where Emacs otherwise inherits a minimal environment and misses tools managed
+;; by fnm, pnpm, cargo, Go, etc.
+(use-package exec-path-from-shell
+  :if (not (eq system-type 'windows-nt))
+  :custom
+  (exec-path-from-shell-variables '("PATH" "MANPATH" "PNPM_HOME"))
+  :config
+  (exec-path-from-shell-initialize))
 
 ;;; Core Emacs defaults
 (use-package emacs
@@ -790,9 +808,15 @@ is non-nil, return only when it returns non-nil."
       :default-height 140
       :line-spacing 1)))
   :config
-  (when (display-graphic-p)
-    (fontaine-mode t)
-    (fontaine-set-preset 'maple-mono)))
+  (defun my/apply-font-preset (&optional frame)
+    "Apply the preferred font preset in graphical FRAME."
+    (with-selected-frame (or frame (selected-frame))
+      (when (display-graphic-p)
+        (fontaine-mode 1)
+        (fontaine-set-preset 'maple-mono))))
+  (my/apply-font-preset)
+  (add-hook 'after-make-frame-functions #'my/apply-font-preset)
+  (add-hook 'server-after-make-frame-hook #'my/apply-font-preset))
 
 ;;; Buffers and windows
 
@@ -864,7 +888,9 @@ is non-nil, return only when it returns non-nil."
 (use-package server
   :ensure nil
   :config
-  (unless (or noninteractive (server-running-p))
+  ;; `emacs --daemon' starts the server itself after init has loaded.
+  ;; Starting it here during daemon startup can race/conflict with that.
+  (unless (or noninteractive (daemonp) (server-running-p))
     (condition-case err
         (server-start)
       (file-error
@@ -2172,7 +2198,7 @@ point on the parent heading; Org then inserts the entry as a child."
 
   (org-default-notes-file (expand-file-name "inbox.org" org-directory))
   (org-todo-keywords
-   '((sequence "TODO(t)" "WAIT(w@)" "|" "DONE(d!)" "CANCELLED(c@)")))
+   '((sequence "TODO(t)" "|" "DONE(d!)" "CANCELLED(c@)")))
   (org-refile-targets `((org-agenda-files :maxlevel . 3)
                         (,(my/org-todo-file) :maxlevel . 3)))
   (org-outline-path-complete-in-steps nil)

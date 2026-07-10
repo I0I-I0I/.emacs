@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Emacs Client
+GenericName=Text Editor
+Comment=Edit text and code files in Emacs client frame
+MimeType=text/plain;text/markdown;text/x-org;text/x-python;text/x-shellscript;text/x-csrc;text/x-c++src;text/x-java;text/x-rust;text/x-go;text/x-lua;text/x-sql;application/json;application/xml;application/x-yaml;application/x-shellscript;application/javascript;application/typescript;
+Exec=emacsclient -c -n -a emacs %F
+Icon=emacs
+Type=Application
+Terminal=false
+Categories=Development;TextEditor;
+StartupNotify=true

@@ -138,6 +138,107 @@ or
 git clean -xfd
 #+end_src
 
+** Open text/code files with Emacs Client
+
+This repository includes per-user installers that add Emacs Client to system file opening integration. On a new machine, first clone this repository into the Emacs config directory, then run the installer for the operating system.
+
+Expected result:
+
+- File manager “Open With…” includes =Emacs Client=.
+- Supported text/code files open in a new graphical Emacs client frame.
+- The Emacs daemon starts automatically after login where supported.
+
+*** New machine setup
+
+**** Linux
+
+#+begin_src bash
+cd ~/.emacs.d
+./scripts/install-open-with-emacs-linux.sh
+#+end_src
+
+**** Windows
+
+From PowerShell, run the installer from the config directory:
+
+#+begin_src powershell
+cd $env:APPDATA\.emacs.d
+./scripts/install-open-with-emacs-windows.ps1
+#+end_src
+
+If Emacs is not found automatically, pass executable paths explicitly:
+
+#+begin_src powershell
+./scripts/install-open-with-emacs-windows.ps1 `
+  -EmacsClientPath "C:\path\to\emacsclientw.exe" `
+  -RunEmacsPath "C:\path\to\runemacs.exe"
+#+end_src
+
+*** Linux details
+
+#+begin_src bash
+./scripts/install-open-with-emacs-linux.sh
+#+end_src
+
+Useful variants:
+
+#+begin_src bash
+./scripts/install-open-with-emacs-linux.sh --no-defaults
+./scripts/install-open-with-emacs-linux.sh --daemon-only
+#+end_src
+
+Test:
+
+#+begin_src bash
+emacsclient -c -n -a emacs README.org
+xdg-mime query default text/plain
+xdg-open README.org
+systemctl --user status emacs.service
+#+end_src
+
+Revert:
+
+#+begin_src bash
+rm ~/.local/share/applications/emacs-client-open.desktop
+# Choose another desktop file for each MIME type you want to restore:
+xdg-mime default OTHER.desktop text/plain
+systemctl --user disable --now emacs.service
+rm ~/.config/systemd/user/emacs.service
+systemctl --user daemon-reload
+#+end_src
+
+Edit =scripts/mime-types.txt= to change the Linux MIME list.
+
+*** Windows
+
+#+begin_src powershell
+./scripts/install-open-with-emacs-windows.ps1
+#+end_src
+
+Useful variants:
+
+#+begin_src powershell
+./scripts/install-open-with-emacs-windows.ps1 -NoDefaults
+./scripts/install-open-with-emacs-windows.ps1 -DaemonOnly
+./scripts/install-open-with-emacs-windows.ps1 -EmacsClientPath C:\path\to\emacsclientw.exe -RunEmacsPath C:\path\to\runemacs.exe
+#+end_src
+
+Test:
+
+#+begin_src powershell
+emacsclientw.exe -c -n -a runemacs.exe README.org
+#+end_src
+
+Revert: restore defaults in Windows Settings → Apps → Default apps, then remove the integration entries:
+
+#+begin_src powershell
+Unregister-ScheduledTask -TaskName EmacsDaemon -Confirm:$false -ErrorAction SilentlyContinue
+Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\Emacs Daemon.lnk" -ErrorAction SilentlyContinue
+Remove-Item 'HKCU:\Software\Classes\Applications\emacsclientw.exe' -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item 'HKCU:\Software\Classes\EmacsClientFile' -Recurse -Force -ErrorAction SilentlyContinue
+# For each configured extension, remove the EmacsClientFile OpenWithProgids value if desired.
+#+end_src
+
 ** Windows notes
 
 - Git is expected at =C:/Program Files/Git/usr/bin= (added to PATH in =init.el=).

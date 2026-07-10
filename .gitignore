@@ -4,3 +4,5 @@
 !/early-init.el
 !/init.el
 !/README.org
+!/scripts/
+!/scripts/*

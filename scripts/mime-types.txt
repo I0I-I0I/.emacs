@@ -1,0 +1,20 @@
+# MIME types opened with Emacs Client on Linux.
+# Blank lines and lines starting with # are ignored.
+text/plain
+text/markdown
+text/x-org
+text/x-python
+text/x-shellscript
+text/x-csrc
+text/x-c++src
+text/x-java
+text/x-rust
+text/x-go
+text/x-lua
+text/x-sql
+application/json
+application/xml
+application/x-yaml
+application/x-shellscript
+application/javascript
+application/typescript
