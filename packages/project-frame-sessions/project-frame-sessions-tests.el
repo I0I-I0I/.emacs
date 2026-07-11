@@ -653,5 +653,137 @@
                                        'tab-bar-close-tab)))
       (project-frame-sessions-mode -1))))
 
+(ert-deftest project-frame-sessions-store-rejects-relative-and-remote-paths ()
+  (dolist (directory '("relative/store/" "/ssh:example.invalid:/tmp/pfs/"))
+    (let ((project-frame-sessions-directory directory))
+      (should-error (project-frame-sessions--read-index)))))
+
+(ert-deftest project-frame-sessions-store-rejects-symlink-root-without-outside-write ()
+  (let* ((parent (make-temp-file "pfs-link-parent-" t))
+         (outside (make-temp-file "pfs-link-outside-" t))
+         (link (expand-file-name "store" parent))
+         (sentinel (expand-file-name "sentinel" outside)))
+    (unwind-protect
+        (progn
+          (with-temp-file sentinel (insert "unchanged"))
+          (make-symbolic-link outside link)
+          (let ((project-frame-sessions-directory (file-name-as-directory link)))
+            (should-error (project-frame-sessions--write-index nil)))
+          (should (equal (with-temp-buffer
+                           (insert-file-contents sentinel)
+                           (buffer-string))
+                         "unchanged"))
+          (should-not (file-exists-p (expand-file-name "index.eld" outside))))
+      (ignore-errors (delete-file link))
+      (ignore-errors (delete-directory parent t))
+      (ignore-errors (delete-directory outside t)))))
+
+(ert-deftest project-frame-sessions-rejects-symlink-managed-roots ()
+  (dolist (root-name '("sessions" "trash" "recovery" ".transaction-lock"))
+    (project-frame-sessions-tests--with-store
+      (let ((outside (make-temp-file "pfs-managed-outside-" t))
+            (link (expand-file-name root-name project-frame-sessions-directory)))
+        (unwind-protect
+            (progn
+              (make-symbolic-link outside link)
+              (should-error (project-frame-sessions--read-index))
+              (should-not (directory-files outside nil directory-files-no-dot-files-regexp)))
+          (ignore-errors (delete-file link))
+          (ignore-errors (delete-directory outside t)))))))
+
+(ert-deftest project-frame-sessions-contained-path-rejects-escape-and-prefix-confusion ()
+  (project-frame-sessions-tests--with-store
+    (let ((sessions (project-frame-sessions--sessions-directory)))
+      (make-directory sessions t)
+      (should-error
+       (project-frame-sessions--assert-contained-path
+        (expand-file-name "../outside" sessions) sessions))
+      (should-error
+       (project-frame-sessions--assert-contained-path
+        (expand-file-name "sessions-other/item" project-frame-sessions-directory)
+        sessions))
+      (should
+       (project-frame-sessions--assert-contained-path
+        (expand-file-name "new-id/new-file" sessions) sessions)))))
+
+(ert-deftest project-frame-sessions-rejects-symlinked-nested-ancestor ()
+  (project-frame-sessions-tests--with-store
+    (let* ((sessions (project-frame-sessions--sessions-directory))
+           (outside (make-temp-file "pfs-nested-outside-" t))
+           (link (expand-file-name "nested" sessions)))
+      (unwind-protect
+          (progn
+            (make-directory sessions t)
+            (make-symbolic-link outside link)
+            (should-error
+             (project-frame-sessions--assert-contained-path
+              (expand-file-name "nested/not-created/file" sessions) sessions)))
+        (ignore-errors (delete-file link))
+        (ignore-errors (delete-directory outside t))))))
+
+(ert-deftest project-frame-sessions-configuration-validation ()
+  (dolist (binding '((project-frame-sessions-autosave-interval . 0)
+                     (project-frame-sessions-autosave-interval . -1)
+                     (project-frame-sessions-debounce-delay . -1)
+                     (project-frame-sessions-maximum-dirty-age . -0.5)
+                     (project-frame-sessions-ownerless-lock-stale-seconds . bad)
+                     (project-frame-sessions-retry-delays . (1 bad 3))))
+    (let ((project-frame-sessions-autosave-interval 300)
+          (project-frame-sessions-debounce-delay 2)
+          (project-frame-sessions-maximum-dirty-age 60)
+          (project-frame-sessions-ownerless-lock-stale-seconds 5)
+          (project-frame-sessions-retry-delays '(1 2)))
+      (set (car binding) (cdr binding))
+      (should-error (project-frame-sessions--validate-configuration))))
+  (dolist (retry '(nil (0) (0.0 1 2.5)))
+    (let ((project-frame-sessions-autosave-interval 0.1)
+          (project-frame-sessions-debounce-delay 0)
+          (project-frame-sessions-maximum-dirty-age 0.0)
+          (project-frame-sessions-ownerless-lock-stale-seconds 0)
+          (project-frame-sessions-retry-delays retry))
+      (should (project-frame-sessions--validate-configuration)))))
+
+(ert-deftest project-frame-sessions-mode-rejects-invalid-values-before-hooks ()
+  (let ((project-frame-sessions-mode nil)
+        (project-frame-sessions-autosave-interval 0)
+        installed)
+    (cl-letf (((symbol-function 'project-frame-sessions--install-hooks)
+               (lambda () (setq installed t))))
+      (should-error (project-frame-sessions-mode 1))
+      (should-not project-frame-sessions-mode)
+      (should-not installed))))
+
+(ert-deftest project-frame-sessions-failpoint-releases-lock ()
+  (project-frame-sessions-tests--with-store
+    (let ((project-frame-sessions--failpoint-function
+           (lambda (name)
+             (when (eq name 'after-lock-acquisition) (error "injected")))))
+      (should-error (project-frame-sessions--with-lock t))
+      (should-not (file-exists-p (project-frame-sessions--lock-directory))))))
+
+(ert-deftest project-frame-sessions-promotion-failpoint-keeps-old-index-and-recovery ()
+  (project-frame-sessions-tests--with-store
+    (let* ((entry (project-frame-sessions-tests--entry))
+           (id (plist-get entry :id))
+           (new-entry (list :id id :name "Work" :root nil))
+           (token "2222222222222222")
+           (stage (project-frame-sessions--stage-directory id token)))
+      (project-frame-sessions--write-index (list entry))
+      (project-frame-sessions-tests--put-snapshot entry "old")
+      (make-directory stage t)
+      (project-frame-sessions-tests--fake-desktop-save stage)
+      (let ((project-frame-sessions--failpoint-function
+             (lambda (name)
+               (when (eq name 'after-snapshot-promotion) (error "injected")))))
+        (should-error
+         (project-frame-sessions--commit-save
+          (selected-frame) new-entry stage token)))
+      (should (equal (project-frame-sessions--read-index) (list entry)))
+      (should (file-exists-p (expand-file-name "metadata.eld" stage)))
+      (should (file-exists-p
+               (expand-file-name
+                (format "sessions/%s/desktop-%s.el" id token)
+                project-frame-sessions-directory))))))
+
 (provide 'project-frame-sessions-tests)
 ;;; project-frame-sessions-tests.el ends here

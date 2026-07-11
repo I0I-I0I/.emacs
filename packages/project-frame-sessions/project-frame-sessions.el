@@ -70,23 +70,25 @@ The function receives one tab alist."
   "Idle fallback interval in seconds, or nil to disable it.
 Only dirty enrolled sessions are saved.  An unmanaged frame with a discoverable
 project may be enrolled by this fallback; an ordinary frame is never enrolled."
-  :type '(choice (const nil) number))
+  :type '(choice (const :tag "Disabled" nil)
+                 (number :tag "Positive seconds")))
 
 (defcustom project-frame-sessions-debounce-delay 2
-  "Seconds to debounce high-frequency workspace changes."
+  "Nonnegative seconds to debounce high-frequency workspace changes."
   :type 'number)
 
 (defcustom project-frame-sessions-maximum-dirty-age 60
-  "Maximum seconds a dirty session may wait before a save attempt."
+  "Nonnegative maximum seconds a dirty session may wait before a save attempt."
   :type 'number)
 
 (defcustom project-frame-sessions-retry-delays '(5 15 45 120 300 600)
-  "Autosave retry delays in seconds.
-The final value is reused after all preceding values have been used."
+  "Autosave retry delays in seconds, or nil to disable automatic retry.
+Every delay must be nonnegative.  The final value is reused after all preceding
+values have been used."
   :type '(repeat number))
 
 (defcustom project-frame-sessions-ownerless-lock-stale-seconds 5
-  "Seconds before an ownerless transaction lock is considered stale.
+  "Nonnegative seconds before an ownerless transaction lock is considered stale.
 This grace period prevents another Emacs process from reclaiming the lock in
 between its atomic directory creation and owner metadata publication."
   :type 'number)
@@ -130,6 +132,40 @@ between its atomic directory creation and owner metadata publication."
 (defvar project-frame-sessions--delete-suppressed nil)
 (defvar project-frame-sessions--recovery-warning-shown nil)
 (defvar project-frame-sessions--inhibit-dirty nil)
+(defvar project-frame-sessions--failpoint-function nil
+  "Dynamically bound test callback called with transaction boundary symbols.")
+
+(defun project-frame-sessions--failpoint (name)
+  "Invoke the dynamically bound test failpoint NAME, when any."
+  (when project-frame-sessions--failpoint-function
+    (funcall project-frame-sessions--failpoint-function name)))
+
+(defun project-frame-sessions--nonnegative-number-p (value)
+  "Return non-nil when VALUE is a finite nonnegative number."
+  (and (numberp value) (>= value 0)))
+
+(defun project-frame-sessions--validate-configuration ()
+  "Reject customization values that could create unsafe timer behavior."
+  (unless (or (null project-frame-sessions-autosave-interval)
+              (and (numberp project-frame-sessions-autosave-interval)
+                   (> project-frame-sessions-autosave-interval 0)))
+    (error "project-frame-sessions-autosave-interval must be nil or positive, not %S"
+           project-frame-sessions-autosave-interval))
+  (dolist (pair `((project-frame-sessions-debounce-delay
+                   . ,project-frame-sessions-debounce-delay)
+                  (project-frame-sessions-maximum-dirty-age
+                   . ,project-frame-sessions-maximum-dirty-age)
+                  (project-frame-sessions-ownerless-lock-stale-seconds
+                   . ,project-frame-sessions-ownerless-lock-stale-seconds)))
+    (unless (project-frame-sessions--nonnegative-number-p (cdr pair))
+      (error "%s must be a nonnegative number, not %S" (car pair) (cdr pair))))
+  (unless (or (null project-frame-sessions-retry-delays)
+              (and (consp project-frame-sessions-retry-delays)
+                   (cl-every #'project-frame-sessions--nonnegative-number-p
+                             project-frame-sessions-retry-delays)))
+    (error "project-frame-sessions-retry-delays must be nil or a nonempty list of nonnegative numbers, not %S"
+           project-frame-sessions-retry-delays))
+  t)
 
 (defun project-frame-sessions--warn (format-string &rest args)
   "Issue a package warning made from FORMAT-STRING and ARGS."
@@ -195,8 +231,94 @@ between its atomic directory creation and owner metadata publication."
 (defun project-frame-sessions--lock-directory ()
   (expand-file-name ".transaction-lock/" project-frame-sessions-directory))
 
+(defun project-frame-sessions--assert-local-path (path)
+  "Return expanded PATH after requiring an absolute local file name."
+  (unless (and (stringp path) (file-name-absolute-p path))
+    (error "Managed path must be absolute: %S" path))
+  (when (file-remote-p path)
+    (error "Managed path must be local: %s" path))
+  (expand-file-name path))
+
+(defun project-frame-sessions--assert-safe-target-ancestry (path &optional stop)
+  "Reject symlinks in existing components of PATH through STOP.
+STOP defaults to the filesystem root.  Dangling symlinks are rejected too."
+  (let ((cursor (directory-file-name
+                 (project-frame-sessions--assert-local-path path)))
+        (stop (and stop (directory-file-name (expand-file-name stop))))
+        done)
+    (while (not done)
+      (when (file-symlink-p cursor)
+        (error "Managed path component is a symlink: %s" cursor))
+      (setq done (or (and stop (equal cursor stop))
+                     (equal cursor (directory-file-name
+                                    (file-name-directory cursor)))))
+      (unless done
+        (setq cursor (directory-file-name (file-name-directory cursor)))))
+    (when (and stop (not (equal cursor stop)))
+      (error "Managed path is outside expected ancestry: %s" path))
+    path))
+
+(defun project-frame-sessions--validate-store ()
+  "Validate and return the configured local package store."
+  (let ((store (file-name-as-directory
+                (project-frame-sessions--assert-local-path
+                 project-frame-sessions-directory))))
+    (project-frame-sessions--assert-safe-target-ancestry store)
+    (when (and (file-exists-p store) (not (file-directory-p store)))
+      (error "Session store is not a directory: %s" store))
+    store))
+
+(defun project-frame-sessions--assert-contained-path (path parent)
+  "Return expanded PATH after proving it is contained by PARENT."
+  (let* ((path (project-frame-sessions--assert-local-path path))
+         (parent (file-name-as-directory
+                  (project-frame-sessions--assert-local-path parent)))
+         (relative (file-relative-name path parent)))
+    (when (or (file-name-absolute-p relative)
+              (equal relative "..")
+              (string-prefix-p "../" relative))
+      (error "Managed path %s escapes %s" path parent))
+    (project-frame-sessions--assert-safe-target-ancestry path parent)
+    path))
+
+(defun project-frame-sessions--assert-real-directory (path &optional parent)
+  "Require existing PATH to be a real directory contained by PARENT."
+  (when parent (project-frame-sessions--assert-contained-path path parent))
+  (project-frame-sessions--assert-safe-target-ancestry path parent)
+  (unless (and (file-directory-p path) (not (file-symlink-p path)))
+    (error "Managed path is not a real directory: %s" path))
+  path)
+
+(defun project-frame-sessions--assert-safe-managed-root (path)
+  "Validate managed root PATH beneath the configured store when it exists."
+  (let ((store (project-frame-sessions--validate-store)))
+    (project-frame-sessions--assert-contained-path path store)
+    (when (or (file-exists-p path) (file-symlink-p path))
+      (project-frame-sessions--assert-real-directory path store))
+    path))
+
+(defun project-frame-sessions--assert-safe-managed-file (file)
+  "Validate FILE ancestry and reject an existing non-regular or symlink file."
+  (let ((store (project-frame-sessions--validate-store)))
+    (project-frame-sessions--assert-contained-path file store)
+    (when (or (file-exists-p file) (file-symlink-p file))
+      (unless (and (file-regular-p file) (not (file-symlink-p file)))
+        (error "Managed file is not a real regular file: %s" file)))
+    file))
+
+(defun project-frame-sessions--validate-managed-roots ()
+  "Validate all existing package-owned roots."
+  (project-frame-sessions--validate-store)
+  (dolist (root (list (project-frame-sessions--sessions-directory)
+                      (project-frame-sessions--trash-directory)
+                      (project-frame-sessions--recovery-directory)
+                      (project-frame-sessions--lock-directory)))
+    (project-frame-sessions--assert-safe-managed-root root))
+  t)
+
 (defun project-frame-sessions--read-object (file)
-  "Read exactly one Lisp object from FILE without read-time evaluation."
+  "Read exactly one Lisp object from safe regular FILE without evaluation."
+  (project-frame-sessions--assert-safe-managed-file file)
   (with-temp-buffer
     (insert-file-contents file)
     (let ((read-eval nil) (object (read (current-buffer))))
@@ -205,8 +327,12 @@ between its atomic directory creation and owner metadata publication."
       object)))
 
 (defun project-frame-sessions--atomic-write (file object)
-  "Atomically write OBJECT to FILE with mode 0600."
+  "Atomically write OBJECT to safe managed FILE with mode 0600."
+  (project-frame-sessions--assert-safe-managed-file file)
+  (project-frame-sessions--assert-safe-target-ancestry
+   (file-name-directory file) (project-frame-sessions--validate-store))
   (make-directory (file-name-directory file) t)
+  (project-frame-sessions--assert-safe-managed-file file)
   (let ((temporary (make-temp-file
                     (expand-file-name ".write-" (file-name-directory file)))))
     (unwind-protect
@@ -254,6 +380,7 @@ between its atomic directory creation and owner metadata publication."
 (defun project-frame-sessions--read-index-data ()
   "Read and strictly validate the current index.
 A corrupt index is never treated as an empty index."
+  (project-frame-sessions--validate-managed-roots)
   (let ((file (project-frame-sessions--index-file)))
     (if (not (file-exists-p file))
         (list :version project-frame-sessions--index-version :entries nil)
@@ -284,6 +411,7 @@ A corrupt index is never treated as an empty index."
 
 (defun project-frame-sessions--write-index (entries)
   "Write validated active ENTRIES."
+  (project-frame-sessions--validate-managed-roots)
   (let ((data (list :version project-frame-sessions--index-version
                     :entries entries)))
     ;; Validate the in-memory object by the same essential invariants first.
@@ -332,6 +460,8 @@ A corrupt index is never treated as an empty index."
 
 (defun project-frame-sessions--ownerless-lock-stale-p (lock)
   "Return non-nil when ownerless LOCK is old enough to reclaim safely."
+  (project-frame-sessions--validate-configuration)
+  (project-frame-sessions--assert-safe-managed-root lock)
   (when-let* ((attributes (file-attributes lock 'integer))
               (modified (file-attribute-modification-time attributes)))
     (>= (- (float-time) (float-time modified))
@@ -339,7 +469,10 @@ A corrupt index is never treated as an empty index."
 
 (defun project-frame-sessions--acquire-lock ()
   "Acquire the package transaction lock and return its directory."
+  (project-frame-sessions--validate-configuration)
+  (project-frame-sessions--validate-managed-roots)
   (make-directory project-frame-sessions-directory t)
+  (project-frame-sessions--validate-managed-roots)
   (let ((lock (project-frame-sessions--lock-directory)))
     (condition-case nil
         (make-directory lock)
@@ -358,6 +491,7 @@ A corrupt index is never treated as an empty index."
            (make-directory lock))
           (t
            (error "Session transaction lock is being initialized"))))))
+    (project-frame-sessions--assert-safe-managed-root lock)
     (project-frame-sessions--atomic-write
      (project-frame-sessions--lock-owner-file lock)
      (list :pid (emacs-pid) :host (system-name) :at (float-time)))
@@ -367,18 +501,27 @@ A corrupt index is never treated as an empty index."
   "Execute BODY while holding the package transaction lock."
   (declare (indent 0) (debug t))
   `(let ((lock (project-frame-sessions--acquire-lock)))
-     (unwind-protect (progn ,@body)
+     (unwind-protect
+         (progn
+           (project-frame-sessions--validate-managed-roots)
+           (project-frame-sessions--failpoint 'after-lock-acquisition)
+           ,@body)
        (when (and (file-directory-p lock) (not (file-symlink-p lock)))
+         (project-frame-sessions--assert-safe-managed-root lock)
          (delete-directory lock t)))))
 
 (defun project-frame-sessions--safe-direct-child-p (path parent regexp)
-  "Return non-nil when PATH is an owned direct child of PARENT matching REGEXP."
-  (let* ((parent (file-name-as-directory (expand-file-name parent)))
-         (path (directory-file-name (expand-file-name path))))
-    (and (string-prefix-p parent (file-name-as-directory path))
-         (equal (file-name-directory path) parent)
-         (string-match-p regexp (file-name-nondirectory path))
-         (not (file-symlink-p path)))))
+  "Return non-nil when PATH is a safe direct child of PARENT matching REGEXP."
+  (condition-case nil
+      (let* ((parent (file-name-as-directory
+                      (project-frame-sessions--assert-local-path parent)))
+             (path (directory-file-name
+                    (project-frame-sessions--assert-local-path path))))
+        (and (equal (file-name-directory path) parent)
+             (string-match-p regexp (file-name-nondirectory path))
+             (not (file-symlink-p path))
+             (progn (project-frame-sessions--assert-contained-path path parent) t)))
+    (error nil)))
 
 (defun project-frame-sessions--with-desktop-state (function)
   "Call FUNCTION with Desktop singleton state dynamically isolated."
@@ -536,6 +679,7 @@ EXCEPT-ID is ignored during uniqueness checking."
 
 (defun project-frame-sessions--retry-delay (failures)
   "Return retry delay for FAILURES consecutive failures."
+  (project-frame-sessions--validate-configuration)
   (let ((delays project-frame-sessions-retry-delays))
     (when delays (nth (min (1- failures) (1- (length delays))) delays))))
 
@@ -558,6 +702,9 @@ EXCEPT-ID is ignored during uniqueness checking."
 
 (defun project-frame-sessions--schedule (id &optional delay)
   "Schedule dirty session ID after DELAY, respecting retry state."
+  (project-frame-sessions--validate-configuration)
+  (when (and delay (not (project-frame-sessions--nonnegative-number-p delay)))
+    (error "Timer delay must be a nonnegative number, not %S" delay))
   (let* ((runtime (project-frame-sessions--runtime id))
          (now (float-time))
          (dirty-since (project-frame-sessions--runtime-dirty-since runtime))
@@ -668,6 +815,7 @@ Return the committed entry.  Caller holds the package lock."
         (error "Session name %S is already in use" (plist-get committed :name))))
     (project-frame-sessions--atomic-write
      metadata-file (list :kind 'save :entry committed :target relative))
+    (project-frame-sessions--failpoint 'after-save-metadata-write)
     (let ((directory (file-name-directory target)))
       (when (file-symlink-p (directory-file-name directory))
         (error "Refusing symlink session directory for %s"
@@ -677,19 +825,27 @@ Return the committed entry.  Caller holds the package lock."
                directory (project-frame-sessions--sessions-directory)
                (format "\\`%s\\'" (regexp-quote id)))
         (error "Unsafe session directory for %s" (plist-get committed :name))))
+    (project-frame-sessions--assert-safe-managed-file staged)
+    (project-frame-sessions--assert-safe-managed-file target)
     (rename-file staged target)
     (set-file-modes target #o600)
+    (project-frame-sessions--failpoint 'after-snapshot-promotion)
     (condition-case err
-        (project-frame-sessions--write-index
-         (project-frame-sessions--replace-entry committed old-entries))
+        (progn
+          (project-frame-sessions--failpoint 'before-index-write)
+          (project-frame-sessions--write-index
+           (project-frame-sessions--replace-entry committed old-entries))
+          (project-frame-sessions--failpoint 'after-index-write))
       (error
        ;; The promoted snapshot remains recoverable with its stage metadata.
        (signal (car err) (cdr err))))
+    (project-frame-sessions--failpoint 'before-old-snapshot-cleanup)
     (when old-entry
       (let ((old-file (project-frame-sessions--entry-snapshot-file old-entry)))
         (when (and (not (equal old-file target)) (file-regular-p old-file)
                    (not (file-symlink-p old-file)))
           (ignore-errors (delete-file old-file)))))
+    (project-frame-sessions--failpoint 'before-stage-cleanup)
     (ignore-errors (delete-directory stage t))
     (project-frame-sessions--cleanup-session-snapshots committed)
     (set-frame-parameter frame project-frame-sessions--id-parameter id)
@@ -744,15 +900,22 @@ Return the committed entry.  Caller holds the package lock."
       (condition-case err
           (unwind-protect
               (project-frame-sessions--with-lock
+                (project-frame-sessions--assert-contained-path
+                 stage (project-frame-sessions--recovery-directory))
                 (make-directory stage t)
+                (project-frame-sessions--assert-real-directory
+                 stage (project-frame-sessions--recovery-directory))
+                (project-frame-sessions--failpoint 'after-stage-creation)
                 (project-frame-sessions--save-desktop-to-stage frame stage)
+                (project-frame-sessions--failpoint 'after-desktop-snapshot-creation)
                 (let ((staged (expand-file-name
                                project-frame-sessions--desktop-name stage)))
                   (unless (file-exists-p staged)
                     (error "Desktop did not create %s"
                            project-frame-sessions--desktop-name))
                   (set-file-modes staged #o600)
-                  (project-frame-sessions--validate-desktop staged))
+                  (project-frame-sessions--validate-desktop staged)
+                  (project-frame-sessions--failpoint 'after-staged-snapshot-validation))
                 (setq committed
                       (project-frame-sessions--commit-save
                        frame entry stage token)))
@@ -1151,24 +1314,34 @@ leaves either the active source authoritative or a complete trash copy."
                     "\\`[0-9a-f]\\{64\\}\\'")
                    (file-regular-p source-file) (not (file-symlink-p source-file)))
         (error "Session %s storage is missing or unsafe" (plist-get entry :name)))
+      (project-frame-sessions--assert-contained-path
+       trash (project-frame-sessions--trash-directory))
       (make-directory trash t)
+      (project-frame-sessions--assert-real-directory
+       trash (project-frame-sessions--trash-directory))
+      (project-frame-sessions--failpoint 'after-trash-creation)
       (condition-case err
           (progn
             (let ((write-region-inhibit-fsync nil))
               (copy-file source-file trash-file t t))
             (set-file-modes trash-file #o600)
+            (project-frame-sessions--failpoint 'after-trash-snapshot-copy)
             (project-frame-sessions--atomic-write
              (project-frame-sessions--trash-metadata-file trash)
              (list :kind 'deleted :entry current :deleted-at (float-time)))
+            (project-frame-sessions--failpoint 'after-delete-metadata-write)
+            (project-frame-sessions--failpoint 'before-delete-index-write)
             (project-frame-sessions--write-index
              (cl-remove id entries :key (lambda (item) (plist-get item :id))
                         :test #'equal))
-            (setq index-committed t))
+            (setq index-committed t)
+            (project-frame-sessions--failpoint 'after-delete-index-write))
         (error
          (unless index-committed (ignore-errors (delete-directory trash t)))
          (signal (car err) (cdr err))))
       ;; Failure here is only orphan cleanup: the index and trash copy have
       ;; already committed the deletion and remain recoverable.
+      (project-frame-sessions--failpoint 'before-deleted-source-cleanup)
       (condition-case err
           (delete-directory source t)
         (error (project-frame-sessions--warn
@@ -1245,13 +1418,17 @@ leaves either the active source authoritative or a complete trash copy."
           (progn
             (make-directory destination t)
             (copy-directory trash destination t t t)
+            (project-frame-sessions--failpoint 'after-recovery-copy)
             (delete-file (project-frame-sessions--trash-metadata-file destination))
-            (project-frame-sessions--write-index (cons entry entries)))
+            (project-frame-sessions--failpoint 'before-recovery-index-write)
+            (project-frame-sessions--write-index (cons entry entries))
+            (project-frame-sessions--failpoint 'after-recovery-index-write))
         (error
          (when (and (file-directory-p destination)
                     (not (file-symlink-p destination)))
            (ignore-errors (delete-directory destination t)))
          (signal (car err) (cdr err))))
+      (project-frame-sessions--failpoint 'before-recovery-trash-cleanup)
       (condition-case err
           (delete-directory trash t)
         (error
@@ -1337,9 +1514,9 @@ trash copy; a complete trash entry wins over unindexed active storage."
 
 (defun project-frame-sessions--scan-recovery ()
   "Scan package transaction artifacts and warn once when recovery is available."
-  (ignore-errors
-    (project-frame-sessions--with-lock
-      (project-frame-sessions--cleanup-interrupted-deletions)))
+  (project-frame-sessions--validate-managed-roots)
+  (project-frame-sessions--with-lock
+    (project-frame-sessions--cleanup-interrupted-deletions))
   (let ((candidates (project-frame-sessions--recovery-stages)))
     (when (and candidates (not project-frame-sessions--recovery-warning-shown))
       (setq project-frame-sessions--recovery-warning-shown t)
@@ -1564,6 +1741,13 @@ frame merely because the mode is enabled."
              (project-frame-sessions--cancel-runtime-timer runtime))
            project-frame-sessions--runtimes)
   (when project-frame-sessions-mode
+    (condition-case err
+        (progn
+          (project-frame-sessions--validate-configuration)
+          (project-frame-sessions--validate-managed-roots))
+      (error
+       (setq project-frame-sessions-mode nil)
+       (signal (car err) (cdr err))))
     (project-frame-sessions--install-hooks)
     (project-frame-sessions--scan-recovery)
     (maphash

@@ -553,10 +553,10 @@ kill buffers that are local to the current frame before deleting it."
   :ensure nil
   :demand t
   :custom
-  ;; Always show the tab bar, including on startup with a single tab.
   (tab-bar-show t)
   (tab-bar-close-button-show nil)
   (tab-bar-new-button-show nil)
+  (tab-bar-tab-hints t)
   :config
   (defun my/tab-bar-switch-to-recent-or-prev-tab ()
     "Switch to the most recent tab, or the previous tab if unavailable."
