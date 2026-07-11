@@ -203,9 +203,13 @@ between its atomic directory creation and owner metadata publication."
       (project-frame-sessions--canonical-root root))))
 
 (defun project-frame-sessions--graphical-frame-p (frame)
-  "Return non-nil if FRAME is a live graphical non-terminal frame."
+  "Return non-nil if FRAME is a savable top-level graphical frame.
+Frames intentionally excluded from Desktop and child frames, such as completion
+popups, cannot own persistent frame sessions."
   (and (frame-live-p frame) (display-graphic-p frame)
-       (not (eq frame terminal-frame))))
+       (not (eq frame terminal-frame))
+       (not (frame-parameter frame 'desktop-dont-save))
+       (not (frame-parent frame))))
 
 (defun project-frame-sessions--frame-id (&optional frame)
   "Return the stable session ID attached to FRAME."
@@ -870,7 +874,7 @@ Return the committed entry.  Caller holds the package lock."
   "Save FRAME transactionally.  MANUAL bypasses retry backoff.
 FIRST-SAVE-METADATA, when non-nil, supplies authoritative project metadata."
   (unless (project-frame-sessions--graphical-frame-p frame)
-    (user-error "Frame sessions require a graphical frame"))
+    (user-error "Frame sessions require a savable top-level graphical frame"))
   (let* ((existing-id (project-frame-sessions--frame-id frame))
          (existing (and existing-id (project-frame-sessions--find-entry existing-id)))
          (pending (gethash frame project-frame-sessions--pending)))
