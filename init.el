@@ -502,6 +502,17 @@ kill buffers that are local to the current frame before deleting it."
     (kill-new (number-to-string (line-number-at-pos)))
     (message "Copied line number: %s" (current-kill 0)))
 
+  (defun my/copy-current-path ()
+    "Copy the current file or directory path relative to the project root."
+    (interactive)
+    (let* ((path (expand-file-name (or buffer-file-name default-directory)))
+           (base (if-let* ((project (project-current nil)))
+                     (project-root project)
+                   default-directory))
+           (relative-path (file-relative-name path base)))
+      (kill-new relative-path)
+      (message "Copied relative path: %s" relative-path)))
+
   :bind
   (("C-v" . scroll-half-page-up)
    ("M-v" . scroll-half-page-down)
@@ -520,15 +531,13 @@ kill buffers that are local to the current frame before deleting it."
    ("M-S-<left>" . org-decrease-number-at-point)
    ("C-x m" . global-mode-line-invisible-mode)
    ("C-c L" . my/copy-current-line-number)
+   ("C-c p" . my/copy-current-path)
    ("C-x f" . toggle-frame-fullscreen)
    ("C-x 5 n" . my/new-workflow-frame)
    ("C-x 5 p" . my/new-project-frame)
    ("C-x 5 d" . my/change-frame-default-directory)
    ("C-x 5 r" . my/rename-frame)
    ("C-x 5 s" . my/switch-frame)
-   ("C-x 5 S" . project-frame-sessions-save)
-   ("C-x 5 R" . project-frame-sessions-restore)
-   ("C-x 5 D" . project-frame-sessions-delete)
    ("C-x 5 0" . my/delete-frame-or-emacs)
    ("C-x 5 K" . my/delete-frame-kill-local-buffers-command)
    ("C-x 5 F" . toggle-frame-fullscreen)
@@ -1255,7 +1264,11 @@ With prefix argument NEW, always create a new eshell buffer."
     ;; the terminal.  Bind tab switching there explicitly too.
     (when (fboundp 'my/define-tab-number-keys)
       (my/define-tab-number-keys eat-eshell-emacs-mode-map)
-      (my/define-tab-number-keys eat-eshell-semi-char-mode-map)))
+      (my/define-tab-number-keys eat-eshell-semi-char-mode-map))
+    (dolist (map (list eat-eshell-emacs-mode-map
+                       eat-eshell-semi-char-mode-map))
+      (keymap-set map "C-M-i" #'tab-bar-switch-to-prev-tab)
+      (keymap-set map "C-M-<tab>" #'tab-bar-switch-to-prev-tab)))
 
   (use-package bash-completion
     :ensure t
@@ -1323,12 +1336,10 @@ With prefix argument NEW, always create a new eshell buffer."
             (t (user-error "No opener found")))))
 
   (defun my/eshell-setup-keymaps ()
-    "Set up Eshell key bindings without global tab-switch overrides."
-    ;; `my/override-map' has higher priority than `eshell-mode-map'.  Keep the
-    ;; rest of the override bindings, but let C-M-i/C-M-<tab> complete in Eshell.
+    "Set up Eshell key bindings, including global tab switching."
+    ;; `my/override-map' has higher priority than Eshell and Eat keymaps, so
+    ;; retain its tab-switch bindings in these buffers.
     (let ((map (copy-keymap my/override-map)))
-      (define-key map (kbd "C-M-i") nil)
-      (define-key map (kbd "C-M-<tab>") nil)
       (when (fboundp 'my/define-tab-number-keys)
         (my/define-tab-number-keys map))
       (setq-local minor-mode-overriding-map-alist
@@ -1337,8 +1348,6 @@ With prefix argument NEW, always create a new eshell buffer."
                                          minor-mode-overriding-map-alist))))
     (when (fboundp 'my/define-tab-number-keys)
       (my/define-tab-number-keys eshell-mode-map))
-    (keymap-set eshell-mode-map "C-M-i" #'completion-at-point)
-    (keymap-set eshell-mode-map "C-M-<tab>" #'completion-at-point)
     (keymap-set eshell-mode-map "C-r" #'my/eshell-history-fuzzy)
     (keymap-set eshell-mode-map "C-l" #'eshell/clear))
 
@@ -1786,7 +1795,12 @@ opened without hiding or toggling the pi buffer."
   (setq desktop-buffers-not-to-save
         (concat "\\`\\*\\(?:vterm\\|eshell\\|magit\\|pi-coding-agent\\|pi-agent\\).*\\*\\(?:<[0-9]+>\\)?\\'"
                 (when desktop-buffers-not-to-save (concat "\\|" desktop-buffers-not-to-save))))
-  (unless noninteractive (project-frame-sessions-mode 1)))
+  (unless noninteractive (project-frame-sessions-mode 1))
+  :bind
+  ("C-x 5 S" . project-frame-sessions-save)
+  ("C-x 5 R" . project-frame-sessions-restore)
+  ("C-x 5 C" . project-frame-sessions-restore-current-frame)
+  ("C-x 5 D" . project-frame-sessions-delete))
 
 ;;; Org mode
 (use-package org-tempo
