@@ -1,0 +1,1581 @@
+;;; project-frame-sessions.el --- Persistent frame workspaces -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026
+;; Author: project-frame-sessions contributors
+;; Package-Requires: ((emacs "29.1"))
+;; Keywords: convenience, frames, sessions
+
+;;; Commentary:
+
+;; Save one explicitly enrolled graphical frame as a named session.  Session
+;; identity is independent of `project.el'; project discovery is optional and is
+;; used only to suggest a root and name.  Desktop saves buffers, and Frameset
+;; saves the complete tab-bar workspace.  Tabspaces' frame-local buffer lists
+;; are represented by the built-in tab parameters and are therefore preserved
+;; without copying Tabspaces globals.
+;;
+;; `project-frame-sessions-directory' must be local and trusted: Desktop files
+;; are executable Lisp when restored.  Metadata is parsed with `read-eval' nil.
+
+;;; Code:
+
+(require 'cl-lib)
+(require 'desktop)
+(require 'frameset)
+(require 'subr-x)
+(require 'tab-bar)
+
+(defvar read-eval)
+(defvar warning-minimum-level)
+(defvar window-state-change-functions)
+(defvar tab-bar-tab-post-open-functions)
+(defvar tab-bar-tab-post-select-functions)
+(defvar write-region-inhibit-fsync)
+
+(declare-function project-root "project" (project))
+(declare-function tabspaces--buffer-list "tabspaces" (&optional frame tabnum))
+
+(defgroup project-frame-sessions nil
+  "Persistent named frame sessions."
+  :group 'frames)
+
+(defcustom project-frame-sessions-directory
+  (expand-file-name "project-frame-sessions/" user-emacs-directory)
+  "Trusted local directory containing frame sessions."
+  :type 'directory)
+
+(defcustom project-frame-sessions-discovery-function
+  #'project-frame-sessions--default-discovery
+  "Function called in a frame to discover an optional local root.
+It may return a directory name or nil.  The default uses `project.el' only when
+that library is available."
+  :type 'function)
+
+(defcustom project-frame-sessions-frame-buffer-function
+  (lambda (frame) (frame-parameter frame 'buffer-list))
+  "Function returning buffers associated with FRAME.
+Buffers associated with non-current tabs are added automatically."
+  :type 'function)
+
+(defcustom project-frame-sessions-tab-omit-function nil
+  "Optional predicate for tabs that should not be persisted.
+The function receives one tab alist."
+  :type '(choice (const nil) function))
+
+(defcustom project-frame-sessions-post-restore-function nil
+  "Optional function called with FRAME after a successful restore."
+  :type '(choice (const nil) function))
+
+(defcustom project-frame-sessions-autosave-interval 300
+  "Idle fallback interval in seconds, or nil to disable it.
+Only dirty enrolled sessions are saved.  An unmanaged frame with a discoverable
+project may be enrolled by this fallback; an ordinary frame is never enrolled."
+  :type '(choice (const nil) number))
+
+(defcustom project-frame-sessions-debounce-delay 2
+  "Seconds to debounce high-frequency workspace changes."
+  :type 'number)
+
+(defcustom project-frame-sessions-maximum-dirty-age 60
+  "Maximum seconds a dirty session may wait before a save attempt."
+  :type 'number)
+
+(defcustom project-frame-sessions-retry-delays '(5 15 45 120 300 600)
+  "Autosave retry delays in seconds.
+The final value is reused after all preceding values have been used."
+  :type '(repeat number))
+
+(defcustom project-frame-sessions-ownerless-lock-stale-seconds 5
+  "Seconds before an ownerless transaction lock is considered stale.
+This grace period prevents another Emacs process from reclaiming the lock in
+between its atomic directory creation and owner metadata publication."
+  :type 'number)
+
+(defcustom project-frame-sessions-warn-function #'display-warning
+  "Function used to report visible warnings."
+  :type 'function)
+
+(defcustom project-frame-sessions-show-status nil
+  "When non-nil, manual commands include concise session status messages."
+  :type 'boolean)
+
+(defconst project-frame-sessions--index-version 1)
+(defconst project-frame-sessions--desktop-name "desktop.el")
+(defconst project-frame-sessions--id-parameter 'project-frame-sessions-id)
+(defconst project-frame-sessions--deleted-parameter 'project-frame-sessions-deleted)
+(defconst project-frame-sessions--generic-frame-names
+  '("" "Emacs" "GNU Emacs" "emacs" "*scratch*"))
+(defconst project-frame-sessions--desktop-state-variables
+  '(desktop-dirname desktop-path desktop-base-file-name
+    desktop-file-name-format desktop-restore-frames desktop-restore-eager
+    desktop-missing-file-warning desktop-after-read-hook
+    desktop-before-save-hook desktop-save-hook desktop-saved-frameset
+    desktop-globals-to-save desktop-buffers-not-to-save
+    desktop-buffers-not-to-save-function desktop-io-file-version
+    desktop-file-modtime desktop-file-checksum desktop-save-buffer
+    desktop-buffer-mode-handlers desktop-locals-to-save))
+
+(cl-defstruct (project-frame-sessions--runtime
+               (:constructor project-frame-sessions--make-runtime))
+  (dirty 0) (saved 0) dirty-since saving (failures 0) next-retry timer
+  last-success last-error last-warning)
+
+(defvar project-frame-sessions-mode nil)
+(defvar project-frame-sessions--runtimes (make-hash-table :test #'equal))
+(defvar project-frame-sessions--pending (make-hash-table :test #'eq)
+  "First-save entries keyed by frame until their initial commit succeeds.")
+(defvar project-frame-sessions--idle-timer nil)
+(defvar project-frame-sessions--shutdown nil)
+(defvar project-frame-sessions--preflight-complete nil)
+(defvar project-frame-sessions--delete-suppressed nil)
+(defvar project-frame-sessions--recovery-warning-shown nil)
+(defvar project-frame-sessions--inhibit-dirty nil)
+
+(defun project-frame-sessions--warn (format-string &rest args)
+  "Issue a package warning made from FORMAT-STRING and ARGS."
+  (funcall project-frame-sessions-warn-function
+           'project-frame-sessions (apply #'format format-string args) :warning))
+
+(defun project-frame-sessions--canonical-root (root)
+  "Return canonical local ROOT, or nil."
+  (when root
+    (unless (and (stringp root) (file-name-absolute-p root))
+      (user-error "Session root must be an absolute directory: %S" root))
+    (when (file-remote-p root)
+      (user-error "Remote session roots are not supported: %s" root))
+    (file-name-as-directory
+     (condition-case nil (file-truename root) (error (expand-file-name root))))))
+
+(defun project-frame-sessions--default-discovery ()
+  "Discover a project root without making `project.el' mandatory."
+  (when (require 'project nil t)
+    (when-let* ((project (project-current nil)))
+      (project-root project))))
+
+(defun project-frame-sessions--discover-root (&optional frame)
+  "Discover FRAME's optional local root."
+  (let ((frame (or frame (selected-frame))))
+    (when-let* ((root (with-selected-frame frame
+                       (funcall project-frame-sessions-discovery-function))))
+      (project-frame-sessions--canonical-root root))))
+
+(defun project-frame-sessions--graphical-frame-p (frame)
+  "Return non-nil if FRAME is a live graphical non-terminal frame."
+  (and (frame-live-p frame) (display-graphic-p frame)
+       (not (eq frame terminal-frame))))
+
+(defun project-frame-sessions--frame-id (&optional frame)
+  "Return the stable session ID attached to FRAME."
+  (frame-parameter (or frame (selected-frame))
+                   project-frame-sessions--id-parameter))
+
+(defun project-frame-sessions--valid-id-p (id)
+  "Return non-nil when ID is a package session ID."
+  (and (stringp id) (string-match-p "\\`[0-9a-f]\\{64\\}\\'" id)))
+
+(defun project-frame-sessions--new-id ()
+  "Generate a stable, unpredictable session ID."
+  (secure-hash
+   'sha256
+   (format "%s:%s:%s:%s:%s" (float-time) (emacs-pid) (system-name)
+           (random most-positive-fixnum) (make-temp-name "pfs"))))
+
+(defun project-frame-sessions--valid-name-p (name)
+  "Return non-nil when NAME is a usable session name."
+  (and (stringp name) (not (string-empty-p (string-trim name)))))
+
+(defun project-frame-sessions--index-file ()
+  (expand-file-name "index.eld" project-frame-sessions-directory))
+(defun project-frame-sessions--sessions-directory ()
+  (expand-file-name "sessions/" project-frame-sessions-directory))
+(defun project-frame-sessions--trash-directory ()
+  (expand-file-name "trash/" project-frame-sessions-directory))
+(defun project-frame-sessions--recovery-directory ()
+  (expand-file-name "recovery/" project-frame-sessions-directory))
+(defun project-frame-sessions--lock-directory ()
+  (expand-file-name ".transaction-lock/" project-frame-sessions-directory))
+
+(defun project-frame-sessions--read-object (file)
+  "Read exactly one Lisp object from FILE without read-time evaluation."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let ((read-eval nil) (object (read (current-buffer))))
+      (skip-chars-forward " \t\r\n")
+      (unless (eobp) (error "Trailing data in %s" file))
+      object)))
+
+(defun project-frame-sessions--atomic-write (file object)
+  "Atomically write OBJECT to FILE with mode 0600."
+  (make-directory (file-name-directory file) t)
+  (let ((temporary (make-temp-file
+                    (expand-file-name ".write-" (file-name-directory file)))))
+    (unwind-protect
+        (progn
+          (set-file-modes temporary #o600)
+          (let ((write-region-inhibit-fsync nil))
+            (with-temp-file temporary
+              (let ((print-length nil) (print-level nil))
+                (prin1 object (current-buffer))
+                (insert "\n"))))
+          (rename-file temporary file t)
+          (set-file-modes file #o600))
+      (when (file-exists-p temporary) (delete-file temporary)))))
+
+(defun project-frame-sessions--entry-snapshot-file (entry)
+  "Return the absolute snapshot file for ENTRY."
+  (expand-file-name (plist-get entry :snapshot)
+                    project-frame-sessions-directory))
+
+(defun project-frame-sessions--valid-snapshot-p (snapshot id)
+  "Return non-nil when SNAPSHOT is a safe relative path for ID."
+  (and (stringp snapshot)
+       (string-match-p
+        (format "\\`sessions/%s/desktop-[0-9a-f]\\{16\\}\\.el\\'"
+                (regexp-quote id))
+        snapshot)))
+
+(defun project-frame-sessions--valid-entry-p (entry)
+  "Return non-nil when ENTRY conforms to the current schema."
+  (let ((id (plist-get entry :id))
+        (name (plist-get entry :name))
+        (root (plist-get entry :root))
+        (snapshot (plist-get entry :snapshot)))
+    (and (listp entry)
+         (project-frame-sessions--valid-id-p id)
+         (project-frame-sessions--valid-name-p name)
+         (or (null root)
+             (and (stringp root) (file-name-absolute-p root)
+                  (not (file-remote-p root))
+                  (equal root (project-frame-sessions--canonical-root root))))
+         (project-frame-sessions--valid-snapshot-p snapshot id)
+         (numberp (plist-get entry :saved-at))
+         (eq (plist-get entry :state) 'active))))
+
+(defun project-frame-sessions--read-index-data ()
+  "Read and strictly validate the current index.
+A corrupt index is never treated as an empty index."
+  (let ((file (project-frame-sessions--index-file)))
+    (if (not (file-exists-p file))
+        (list :version project-frame-sessions--index-version :entries nil)
+      (condition-case err
+          (let* ((data (project-frame-sessions--read-object file))
+                 (version (plist-get data :version))
+                 (entries (plist-get data :entries))
+                 ids names)
+            (unless (and (= version project-frame-sessions--index-version)
+                         (listp entries))
+              (error "Invalid index schema"))
+            (dolist (entry entries)
+              (unless (project-frame-sessions--valid-entry-p entry)
+                (error "Invalid session entry"))
+              (let ((id (plist-get entry :id))
+                    (name (plist-get entry :name)))
+                (when (or (member id ids) (member name names))
+                  (error "Duplicate session ID or name"))
+                (push id ids) (push name names)))
+            data)
+        (error
+         (error "Refusing to overwrite corrupt session index %s: %s"
+                file (error-message-string err)))))))
+
+(defun project-frame-sessions--read-index ()
+  "Return validated active index entries."
+  (plist-get (project-frame-sessions--read-index-data) :entries))
+
+(defun project-frame-sessions--write-index (entries)
+  "Write validated active ENTRIES."
+  (let ((data (list :version project-frame-sessions--index-version
+                    :entries entries)))
+    ;; Validate the in-memory object by the same essential invariants first.
+    (let (ids names)
+      (dolist (entry entries)
+        (unless (project-frame-sessions--valid-entry-p entry)
+          (error "Refusing to write invalid session entry"))
+        (when (or (member (plist-get entry :id) ids)
+                  (member (plist-get entry :name) names))
+          (error "Session names and IDs must be unique"))
+        (push (plist-get entry :id) ids)
+        (push (plist-get entry :name) names)))
+    (project-frame-sessions--atomic-write
+     (project-frame-sessions--index-file) data)))
+
+(defun project-frame-sessions--find-entry (id &optional entries)
+  "Find session ID in ENTRIES or the active index."
+  (cl-find id (or entries (project-frame-sessions--read-index))
+           :key (lambda (entry) (plist-get entry :id)) :test #'equal))
+
+(defun project-frame-sessions--find-entry-by-name (name &optional entries)
+  "Find session NAME in ENTRIES or the active index."
+  (cl-find name (or entries (project-frame-sessions--read-index))
+           :key (lambda (entry) (plist-get entry :name)) :test #'equal))
+
+(defun project-frame-sessions--frame-entry (&optional frame)
+  "Return the active entry attached to FRAME, if any."
+  (when-let* ((id (project-frame-sessions--frame-id frame)))
+    (project-frame-sessions--find-entry id)))
+
+(defun project-frame-sessions--entry-name (id)
+  "Return the display name for ID."
+  (or (when-let* ((entry (project-frame-sessions--find-entry id)))
+        (plist-get entry :name))
+      id))
+
+(defun project-frame-sessions--lock-owner-file (&optional lock)
+  "Return the owner metadata file for LOCK or the published lock."
+  (expand-file-name "owner.eld" (or lock (project-frame-sessions--lock-directory))))
+
+(defun project-frame-sessions--owner-live-p (owner)
+  "Return non-nil if lock OWNER should be considered live."
+  (let ((pid (plist-get owner :pid)) (host (plist-get owner :host)))
+    (and (integerp pid) (stringp host)
+         (if (equal host (system-name)) (process-attributes pid) t))))
+
+(defun project-frame-sessions--ownerless-lock-stale-p (lock)
+  "Return non-nil when ownerless LOCK is old enough to reclaim safely."
+  (when-let* ((attributes (file-attributes lock 'integer))
+              (modified (file-attribute-modification-time attributes)))
+    (>= (- (float-time) (float-time modified))
+        project-frame-sessions-ownerless-lock-stale-seconds)))
+
+(defun project-frame-sessions--acquire-lock ()
+  "Acquire the package transaction lock and return its directory."
+  (make-directory project-frame-sessions-directory t)
+  (let ((lock (project-frame-sessions--lock-directory)))
+    (condition-case nil
+        (make-directory lock)
+      (file-already-exists
+       (let ((owner (ignore-errors
+                      (project-frame-sessions--read-object
+                       (project-frame-sessions--lock-owner-file lock)))))
+         (cond
+          ((and owner (project-frame-sessions--owner-live-p owner))
+           (error "Session transaction is locked by PID %s on %s"
+                  (plist-get owner :pid) (plist-get owner :host)))
+          ((or owner (project-frame-sessions--ownerless-lock-stale-p lock))
+           (when (file-symlink-p lock)
+             (error "Refusing symlink transaction lock"))
+           (delete-directory lock t)
+           (make-directory lock))
+          (t
+           (error "Session transaction lock is being initialized"))))))
+    (project-frame-sessions--atomic-write
+     (project-frame-sessions--lock-owner-file lock)
+     (list :pid (emacs-pid) :host (system-name) :at (float-time)))
+    lock))
+
+(defmacro project-frame-sessions--with-lock (&rest body)
+  "Execute BODY while holding the package transaction lock."
+  (declare (indent 0) (debug t))
+  `(let ((lock (project-frame-sessions--acquire-lock)))
+     (unwind-protect (progn ,@body)
+       (when (and (file-directory-p lock) (not (file-symlink-p lock)))
+         (delete-directory lock t)))))
+
+(defun project-frame-sessions--safe-direct-child-p (path parent regexp)
+  "Return non-nil when PATH is an owned direct child of PARENT matching REGEXP."
+  (let* ((parent (file-name-as-directory (expand-file-name parent)))
+         (path (directory-file-name (expand-file-name path))))
+    (and (string-prefix-p parent (file-name-as-directory path))
+         (equal (file-name-directory path) parent)
+         (string-match-p regexp (file-name-nondirectory path))
+         (not (file-symlink-p path)))))
+
+(defun project-frame-sessions--with-desktop-state (function)
+  "Call FUNCTION with Desktop singleton state dynamically isolated."
+  (let* ((variables (cl-remove-if-not
+                     #'boundp project-frame-sessions--desktop-state-variables))
+         (values (mapcar #'symbol-value variables)))
+    (cl-progv variables values (funcall function))))
+
+(defun project-frame-sessions--filter-tabs (current filtered parameters saving)
+  "Sanitize CURRENT tabs and optionally omit tabs while SAVING.
+FILTERED and PARAMETERS are passed through to `frameset-filter-tabs'."
+  (let ((parameter (frameset-filter-tabs current filtered parameters saving)))
+    (if (not (and saving project-frame-sessions-tab-omit-function))
+        parameter
+      ;; Frameset filters receive the complete (tabs . VALUE) parameter, not
+      ;; VALUE alone.  Never pass its `tabs' key to the user predicate.
+      (let* ((kept (cl-remove-if project-frame-sessions-tab-omit-function
+                                 (cdr parameter)))
+             (current-tab (cl-find-if
+                           (lambda (tab)
+                             (eq (car-safe tab) 'current-tab))
+                           kept)))
+        (when (and kept (not current-tab))
+          (setcar kept (cons 'current-tab (cdar kept))))
+        (cons (car parameter) kept)))))
+
+(defun project-frame-sessions--tab-buffers (frame)
+  "Return all live buffers associated with every tab of FRAME.
+This includes the `wc-bl', `wc-bbl', and Tabspaces workspace association stored
+in the built-in `ws' tab parameter."
+  (let ((buffers (copy-sequence
+                  (funcall project-frame-sessions-frame-buffer-function frame))))
+    (dolist (tab (frame-parameter frame 'tabs))
+      (dolist (buffer (append (cdr (assq 'wc-bl tab))
+                              (cdr (assq 'wc-bbl tab))))
+        (when (buffer-live-p buffer) (cl-pushnew buffer buffers)))
+      (when-let* ((workspace (assq 'ws tab))
+                  (association (assq #'tabspaces--buffer-list workspace)))
+        (dolist (item (car (cdr association)))
+          (let ((buffer (if (bufferp item) item (get-buffer item))))
+            (when (buffer-live-p buffer) (cl-pushnew buffer buffers))))))
+    (cl-delete-if-not #'buffer-live-p buffers)))
+
+(defun project-frame-sessions--buffer-save-predicate (buffers prior)
+  "Return a Desktop predicate restricted to BUFFERS and honoring PRIOR."
+  (lambda (filename buffer-name mode &rest args)
+    (let ((buffer (get-buffer buffer-name)))
+      (and (buffer-live-p buffer) (memq buffer buffers)
+           (or (null prior)
+               (apply prior filename buffer-name mode args))))))
+
+(defun project-frame-sessions--desktop-frameset-form (form)
+  "Extract a quoted Desktop frameset value from FORM, or nil."
+  (when (and (listp form) (eq (car form) 'setq))
+    (let ((tail (cdr form)) value found)
+      (while tail
+        (let ((variable (pop tail)) (expression (pop tail)))
+          (when (eq variable 'desktop-saved-frameset)
+            (setq value (if (and (consp expression)
+                                 (eq (car expression) 'quote))
+                            (cadr expression)
+                          expression)
+                  found t))))
+      (and found value))))
+
+(defun project-frame-sessions--validate-desktop (file)
+  "Validate that FILE is readable Desktop data containing exactly one frame.
+The file is parsed with `read-eval' disabled and is not evaluated."
+  (unless (and (file-regular-p file) (not (file-symlink-p file)))
+    (error "Desktop did not produce a regular snapshot"))
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let ((read-eval nil) frameset done)
+      (while (not done)
+        (condition-case nil
+            (let* ((form (read (current-buffer)))
+                   (candidate (project-frame-sessions--desktop-frameset-form form)))
+              (when candidate (setq frameset candidate)))
+          (end-of-file (setq done t))))
+      (unless (and (frameset-p frameset)
+                   (= (length (frameset-states frameset)) 1))
+        (error "Snapshot must contain exactly one saved frame"))
+      t)))
+
+(defun project-frame-sessions--name-used-p (name &optional except-id)
+  "Return non-nil if active NAME is used by a session other than EXCEPT-ID."
+  (cl-some (lambda (entry)
+             (and (equal name (plist-get entry :name))
+                  (not (equal except-id (plist-get entry :id)))))
+           (project-frame-sessions--read-index)))
+
+(defun project-frame-sessions--generic-frame-name-p (name)
+  "Return non-nil when NAME is unsuitable as a default session name."
+  (or (not (project-frame-sessions--valid-name-p name))
+      (member (string-trim name) project-frame-sessions--generic-frame-names)
+      (string-match-p "\\`Emacs@" (string-trim name))))
+
+(defun project-frame-sessions--directory-default-name (frame root)
+  "Return a useful naming default for FRAME and optional ROOT."
+  (let* ((directory (or root (frame-parameter frame 'default-directory)
+                        (with-selected-frame frame default-directory)))
+         (local (and directory (not (file-remote-p directory)) directory)))
+    (if local
+        (file-name-nondirectory (directory-file-name (expand-file-name local)))
+      "Session")))
+
+(defun project-frame-sessions--read-unique-name (prompt default &optional except-id)
+  "Read a nonempty unique name with PROMPT and DEFAULT.
+EXCEPT-ID is ignored during uniqueness checking."
+  (let ((reason prompt) name)
+    (while (not name)
+      (let ((candidate (string-trim (read-string reason nil nil default))))
+        (cond
+         ((string-empty-p candidate)
+          (setq reason "Session name cannot be empty; choose another: "))
+         ((project-frame-sessions--name-used-p candidate except-id)
+          (setq reason (format "Session name %S is already in use; choose another: "
+                               candidate)))
+         (t (setq name candidate)))))
+    name))
+
+(defun project-frame-sessions--first-save-metadata (frame)
+  "Return (:name NAME :root ROOT) for FRAME's first save."
+  (let* ((root (ignore-errors (project-frame-sessions--discover-root frame)))
+         (project-name (and root
+                            (file-name-nondirectory (directory-file-name root))))
+         (frame-name (format "%s" (or (frame-parameter frame 'name) "")))
+         (suggestion (cond
+                      ((and (project-frame-sessions--valid-name-p project-name)
+                            (not (project-frame-sessions--name-used-p project-name)))
+                       project-name)
+                      ((and (not (project-frame-sessions--generic-frame-name-p frame-name))
+                            (not (project-frame-sessions--name-used-p frame-name)))
+                       frame-name))))
+    (list :name (or suggestion
+                    (project-frame-sessions--read-unique-name
+                     (if (or (project-frame-sessions--name-used-p project-name)
+                             (project-frame-sessions--name-used-p frame-name))
+                         "Suggested name is already in use; choose a session name: "
+                       "Name this frame session: ")
+                     (project-frame-sessions--directory-default-name frame root)))
+          :root root)))
+
+(defun project-frame-sessions--runtime (id)
+  "Return, creating if needed, runtime state for session ID."
+  (or (gethash id project-frame-sessions--runtimes)
+      (puthash id (project-frame-sessions--make-runtime)
+               project-frame-sessions--runtimes)))
+
+(defun project-frame-sessions--cancel-runtime-timer (runtime)
+  "Cancel RUNTIME's pending timer."
+  (when (timerp (project-frame-sessions--runtime-timer runtime))
+    (cancel-timer (project-frame-sessions--runtime-timer runtime)))
+  (setf (project-frame-sessions--runtime-timer runtime) nil))
+
+(defun project-frame-sessions--retry-delay (failures)
+  "Return retry delay for FAILURES consecutive failures."
+  (let ((delays project-frame-sessions-retry-delays))
+    (when delays (nth (min (1- failures) (1- (length delays))) delays))))
+
+(defun project-frame-sessions--find-live-frame (id &optional except)
+  "Find a live frame attached to ID, excluding EXCEPT."
+  (cl-find-if (lambda (frame)
+                (and (frame-live-p frame) (not (eq frame except))
+                     (equal id (project-frame-sessions--frame-id frame))))
+              (frame-list)))
+
+(defun project-frame-sessions--find-pending-frame (id)
+  "Find the live first-save frame whose pending entry has ID."
+  (let (found)
+    (maphash (lambda (frame entry)
+               (when (and (not found) (frame-live-p frame)
+                          (equal id (plist-get entry :id)))
+                 (setq found frame)))
+             project-frame-sessions--pending)
+    found))
+
+(defun project-frame-sessions--schedule (id &optional delay)
+  "Schedule dirty session ID after DELAY, respecting retry state."
+  (let* ((runtime (project-frame-sessions--runtime id))
+         (now (float-time))
+         (dirty-since (project-frame-sessions--runtime-dirty-since runtime))
+         (forced (and dirty-since
+                      (>= (- now dirty-since)
+                          project-frame-sessions-maximum-dirty-age)))
+         (retry (project-frame-sessions--runtime-next-retry runtime))
+         (seconds (if forced 0 (or delay project-frame-sessions-debounce-delay))))
+    (when (and retry (> retry now))
+      (setq seconds (max seconds (- retry now))))
+    (project-frame-sessions--cancel-runtime-timer runtime)
+    (setf (project-frame-sessions--runtime-timer runtime)
+          (run-at-time seconds nil #'project-frame-sessions--autosave-id id))))
+
+(defun project-frame-sessions--mark-frame-dirty (&optional frame)
+  "Mark enrolled FRAME dirty and debounce an autosave."
+  (unless project-frame-sessions--inhibit-dirty
+    (let* ((frame (or frame (selected-frame)))
+           (id (and (project-frame-sessions--graphical-frame-p frame)
+                    (project-frame-sessions--frame-id frame))))
+      (when id
+        (let ((runtime (project-frame-sessions--runtime id)))
+          (cl-incf (project-frame-sessions--runtime-dirty runtime))
+          (unless (project-frame-sessions--runtime-dirty-since runtime)
+            (setf (project-frame-sessions--runtime-dirty-since runtime)
+                  (float-time)))
+          (project-frame-sessions--schedule id))))))
+
+(defun project-frame-sessions--event-dirty (&optional frame &rest _)
+  "Mark the affected enrolled graphical FRAME dirty.
+Hooks that do not supply a frame, including buffer-list hooks and tab hooks,
+fall back to the selected frame."
+  (when project-frame-sessions-mode
+    (project-frame-sessions--mark-frame-dirty
+     (if (framep frame) frame (selected-frame)))))
+
+(defun project-frame-sessions--save-desktop-to-stage (frame stage)
+  "Save FRAME's Desktop snapshot into STAGE."
+  (let* ((buffers (project-frame-sessions--tab-buffers frame))
+         (prior desktop-buffers-not-to-save-function)
+         (old-parameters
+          (mapcar (lambda (candidate)
+                    (cons candidate
+                          (frame-parameter candidate 'desktop-dont-save)))
+                  (frame-list))))
+    (unwind-protect
+        (progn
+          (dolist (candidate (frame-list))
+            (unless (eq candidate frame)
+              (set-frame-parameter candidate 'desktop-dont-save t)))
+          (project-frame-sessions--with-desktop-state
+           (lambda ()
+             (let ((project-frame-sessions--inhibit-dirty t)
+                   (write-region-inhibit-fsync nil)
+                   (desktop-buffers-not-to-save-function
+                    (project-frame-sessions--buffer-save-predicate buffers prior))
+                   (desktop-restore-frames t)
+                   (desktop-globals-to-save nil)
+                   (desktop-file-name-format 'absolute)
+                   (desktop-base-file-name project-frame-sessions--desktop-name)
+                   (frameset-filter-alist
+                    (cons '(tabs . project-frame-sessions--filter-tabs)
+                          frameset-filter-alist)))
+               (desktop-save stage t)))))
+      (dolist (pair old-parameters)
+        (when (frame-live-p (car pair))
+          (set-frame-parameter (car pair) 'desktop-dont-save (cdr pair)))))))
+
+(defun project-frame-sessions--stage-directory (id token)
+  (expand-file-name (format ".stage-%s-%s/" id token)
+                    (project-frame-sessions--recovery-directory)))
+
+(defun project-frame-sessions--replace-entry (entry entries)
+  "Return ENTRIES with ENTRY replacing the same ID."
+  (cons entry (cl-remove (plist-get entry :id) entries
+                         :key (lambda (item) (plist-get item :id))
+                         :test #'equal)))
+
+(defun project-frame-sessions--cleanup-session-snapshots (entry)
+  "Delete superseded regular snapshot files belonging to ENTRY."
+  (let ((directory (file-name-directory
+                    (project-frame-sessions--entry-snapshot-file entry)))
+        (keep (project-frame-sessions--entry-snapshot-file entry)))
+    (when (and (file-directory-p directory) (not (file-symlink-p directory)))
+      (dolist (file (directory-files directory t
+                                     "\\`desktop-[0-9a-f]\\{16\\}\\.el\\'"))
+        (when (and (not (equal file keep)) (file-regular-p file)
+                   (not (file-symlink-p file)))
+          (delete-file file))))))
+
+(defun project-frame-sessions--commit-save (frame entry stage token)
+  "Commit FRAME's staged ENTRY from STAGE using TOKEN.
+Return the committed entry.  Caller holds the package lock."
+  (let* ((id (plist-get entry :id))
+         (relative (format "sessions/%s/desktop-%s.el" id token))
+         (target (expand-file-name relative project-frame-sessions-directory))
+         (staged (expand-file-name project-frame-sessions--desktop-name stage))
+         (metadata-file (expand-file-name "metadata.eld" stage))
+         (old-entries (project-frame-sessions--read-index))
+         (old-entry (project-frame-sessions--find-entry id old-entries))
+         (committed (copy-sequence entry)))
+    (setq committed (plist-put committed :snapshot relative))
+    (setq committed (plist-put committed :saved-at (float-time)))
+    (setq committed (plist-put committed :state 'active))
+    (when-let* ((collision (project-frame-sessions--find-entry-by-name
+                           (plist-get committed :name) old-entries)))
+      (unless (equal id (plist-get collision :id))
+        (error "Session name %S is already in use" (plist-get committed :name))))
+    (project-frame-sessions--atomic-write
+     metadata-file (list :kind 'save :entry committed :target relative))
+    (let ((directory (file-name-directory target)))
+      (when (file-symlink-p (directory-file-name directory))
+        (error "Refusing symlink session directory for %s"
+               (plist-get committed :name)))
+      (make-directory directory t)
+      (unless (project-frame-sessions--safe-direct-child-p
+               directory (project-frame-sessions--sessions-directory)
+               (format "\\`%s\\'" (regexp-quote id)))
+        (error "Unsafe session directory for %s" (plist-get committed :name))))
+    (rename-file staged target)
+    (set-file-modes target #o600)
+    (condition-case err
+        (project-frame-sessions--write-index
+         (project-frame-sessions--replace-entry committed old-entries))
+      (error
+       ;; The promoted snapshot remains recoverable with its stage metadata.
+       (signal (car err) (cdr err))))
+    (when old-entry
+      (let ((old-file (project-frame-sessions--entry-snapshot-file old-entry)))
+        (when (and (not (equal old-file target)) (file-regular-p old-file)
+                   (not (file-symlink-p old-file)))
+          (ignore-errors (delete-file old-file)))))
+    (ignore-errors (delete-directory stage t))
+    (project-frame-sessions--cleanup-session-snapshots committed)
+    (set-frame-parameter frame project-frame-sessions--id-parameter id)
+    (set-frame-parameter frame project-frame-sessions--deleted-parameter nil)
+    committed))
+
+(cl-defun project-frame-sessions--save-frame-internal (frame manual)
+  "Save FRAME transactionally.  MANUAL bypasses retry backoff."
+  (unless (project-frame-sessions--graphical-frame-p frame)
+    (user-error "Frame sessions require a graphical frame"))
+  (let* ((existing-id (project-frame-sessions--frame-id frame))
+         (existing (and existing-id (project-frame-sessions--find-entry existing-id)))
+         (pending (gethash frame project-frame-sessions--pending)))
+    (when (and existing-id (not existing))
+      (error "Frame refers to missing session %s" existing-id))
+    (let* ((metadata (unless (or existing pending)
+                       (project-frame-sessions--first-save-metadata frame)))
+           (id (or existing-id (plist-get pending :id)
+                   (project-frame-sessions--new-id)))
+           (entry (or (and existing (copy-sequence existing))
+                      (and pending (copy-sequence pending))
+                      (list :id id :name (plist-get metadata :name)
+                            :root (plist-get metadata :root))))
+           (runtime (project-frame-sessions--runtime id))
+           start-generation
+           (token (substring (secure-hash 'sha256
+                                          (format "%s:%s:%s" id (float-time)
+                                                  (random most-positive-fixnum)))
+                             0 16))
+           (stage (project-frame-sessions--stage-directory id token))
+           committed)
+      (unless existing
+        (puthash frame entry project-frame-sessions--pending)
+        (when (= (project-frame-sessions--runtime-dirty runtime)
+                 (project-frame-sessions--runtime-saved runtime))
+          (cl-incf (project-frame-sessions--runtime-dirty runtime))
+          (setf (project-frame-sessions--runtime-dirty-since runtime)
+                (float-time))))
+      (setq start-generation (project-frame-sessions--runtime-dirty runtime))
+      (when (project-frame-sessions--runtime-saving runtime)
+        (if manual (user-error "Session %s is already being saved"
+                               (plist-get entry :name))
+          (cl-return-from project-frame-sessions--save-frame-internal nil)))
+      (when (and (not manual)
+                 (project-frame-sessions--runtime-next-retry runtime)
+                 (> (project-frame-sessions--runtime-next-retry runtime)
+                    (float-time)))
+        (project-frame-sessions--schedule id)
+        (cl-return-from project-frame-sessions--save-frame-internal nil))
+      (setf (project-frame-sessions--runtime-saving runtime) t)
+      (project-frame-sessions--cancel-runtime-timer runtime)
+      (condition-case err
+          (unwind-protect
+              (project-frame-sessions--with-lock
+                (make-directory stage t)
+                (project-frame-sessions--save-desktop-to-stage frame stage)
+                (let ((staged (expand-file-name
+                               project-frame-sessions--desktop-name stage)))
+                  (unless (file-exists-p staged)
+                    (error "Desktop did not create %s"
+                           project-frame-sessions--desktop-name))
+                  (set-file-modes staged #o600)
+                  (project-frame-sessions--validate-desktop staged))
+                (setq committed
+                      (project-frame-sessions--commit-save
+                       frame entry stage token)))
+            (setf (project-frame-sessions--runtime-saving runtime) nil))
+        (error
+         (setf (project-frame-sessions--runtime-saving runtime) nil)
+         (cl-incf (project-frame-sessions--runtime-failures runtime))
+         (let* ((failures (project-frame-sessions--runtime-failures runtime))
+                (delay (project-frame-sessions--retry-delay failures))
+                (name (plist-get entry :name))
+                (reason (error-message-string err)))
+           (setf (project-frame-sessions--runtime-last-error runtime) reason
+                 (project-frame-sessions--runtime-next-retry runtime)
+                 (and delay (+ (float-time) delay)))
+           (unless (project-frame-sessions--runtime-dirty-since runtime)
+             (setf (project-frame-sessions--runtime-dirty-since runtime)
+                   (float-time)))
+           (project-frame-sessions--warn
+            "Session %s save failed: %s. The last committed snapshot is safe.%s Run M-x project-frame-sessions-save to retry now."
+            name reason (if delay (format " Automatic retry in %ss." delay) ""))
+           (when delay (project-frame-sessions--schedule id delay)))
+         (signal (car err) (cdr err))))
+      (when committed
+        (remhash frame project-frame-sessions--pending)
+        (setf (project-frame-sessions--runtime-saved runtime) start-generation
+              (project-frame-sessions--runtime-failures runtime) 0
+              (project-frame-sessions--runtime-next-retry runtime) nil
+              (project-frame-sessions--runtime-last-error runtime) nil
+              (project-frame-sessions--runtime-last-success runtime) (float-time))
+        (if (> (project-frame-sessions--runtime-dirty runtime) start-generation)
+            (project-frame-sessions--schedule id)
+          (setf (project-frame-sessions--runtime-dirty-since runtime) nil))
+        committed))))
+
+(defun project-frame-sessions--handle-deleted-frame (frame)
+  "Resolve FRAME's detached soft-deleted session before saving."
+  (when-let* ((deleted (frame-parameter frame
+                                        project-frame-sessions--deleted-parameter)))
+    (pcase (read-char-choice
+            (format "Session %s was deleted: [r]ecover it or create [n]ew? "
+                    (plist-get deleted :name))
+            '(?r ?n))
+      (?r
+       (project-frame-sessions--recover-trash-entry
+        (plist-get deleted :trash) frame))
+      (?n
+       (set-frame-parameter frame project-frame-sessions--deleted-parameter nil)))))
+
+;;;###autoload
+(defun project-frame-sessions-save (&optional frame)
+  "Enroll if necessary, then save FRAME transactionally.
+Interactively FRAME is the selected frame.  A manual first save works without
+`project.el' and prompts only when no acceptable unique name can be inferred."
+  (interactive)
+  (let ((frame (or frame (selected-frame))))
+    (project-frame-sessions--handle-deleted-frame frame)
+    (let ((entry (project-frame-sessions--save-frame-internal frame t)))
+      (when entry
+        (message "Saved frame session %s" (plist-get entry :name)))
+      entry)))
+
+(defun project-frame-sessions--autosave-id (id)
+  "Autosave dirty session ID and retain failures for retry."
+  (when project-frame-sessions-mode
+    (when-let* ((frame (or (project-frame-sessions--find-live-frame id)
+                           (project-frame-sessions--find-pending-frame id)))
+                (runtime (project-frame-sessions--runtime id)))
+      (when (> (project-frame-sessions--runtime-dirty runtime)
+               (project-frame-sessions--runtime-saved runtime))
+        (condition-case nil
+            (project-frame-sessions--save-frame-internal frame nil)
+          (error nil))))))
+
+(defun project-frame-sessions--idle-save ()
+  "Idle fallback for dirty sessions and project-assisted enrollment."
+  (when project-frame-sessions-mode
+    (dolist (frame (frame-list))
+      (when (project-frame-sessions--graphical-frame-p frame)
+        (if-let* ((id (project-frame-sessions--frame-id frame)))
+            (project-frame-sessions--autosave-id id)
+          ;; Ordinary frames remain untouched.  A detected project may perform
+          ;; its first save without assigning identity until commit succeeds.
+          (when (ignore-errors (project-frame-sessions--discover-root frame))
+            (condition-case err
+                (project-frame-sessions--save-frame-internal frame nil)
+              (error
+               (project-frame-sessions--warn
+                "Automatic project enrollment failed: %s"
+                (error-message-string err))))))))))
+
+(defun project-frame-sessions-status (&optional frame)
+  "Return a concise status symbol for FRAME's session."
+  (let* ((frame (or frame (selected-frame)))
+         (deleted (frame-parameter frame project-frame-sessions--deleted-parameter))
+         (id (project-frame-sessions--frame-id frame))
+         (runtime (and id (project-frame-sessions--runtime id))))
+    (cond
+     (deleted 'soft-deleted)
+     ((not id) 'unmanaged)
+     ((project-frame-sessions--runtime-saving runtime) 'saving)
+     ((project-frame-sessions--runtime-last-error runtime)
+      (if (project-frame-sessions--runtime-next-retry runtime)
+          'retry-scheduled 'save-failed))
+     ((> (project-frame-sessions--runtime-dirty runtime)
+         (project-frame-sessions--runtime-saved runtime)) 'dirty)
+     (t 'saved))))
+
+(defun project-frame-sessions--candidate-label (entry &optional state)
+  "Return concise selection label for ENTRY and STATE."
+  (format "%s%s" (plist-get entry :name)
+          (pcase state
+            ('deleted " (deleted)")
+            ('recovery " (recovery)")
+            (_ (if (project-frame-sessions--find-live-frame
+                    (plist-get entry :id)) " (open)" "")))))
+
+(defun project-frame-sessions--active-choices ()
+  "Return active restore completion choices."
+  (let (choices)
+    (dolist (entry (sort (copy-sequence (project-frame-sessions--read-index))
+                         (lambda (a b) (> (plist-get a :saved-at)
+                                          (plist-get b :saved-at)))))
+      (if (file-exists-p (project-frame-sessions--entry-snapshot-file entry))
+          (push (cons (project-frame-sessions--candidate-label entry) entry) choices)
+        (project-frame-sessions--warn "Session %s has a missing snapshot"
+                                      (plist-get entry :name))))
+    (nreverse choices)))
+
+(defun project-frame-sessions--select-active (prompt)
+  "Select an active session using PROMPT."
+  (project-frame-sessions--scan-recovery)
+  (let ((choices (project-frame-sessions--active-choices)))
+    (unless choices (user-error "No saved frame sessions"))
+    (let* ((selection (completing-read prompt choices nil t))
+           (entry (cdr (assoc selection choices))))
+      (unless entry (user-error "No session selected"))
+      entry)))
+
+(defun project-frame-sessions--read-desktop-frameset (entry frame)
+  "Read ENTRY's Desktop buffers in FRAME and return its single Frameset.
+Desktop clears `desktop-saved-frameset' before `desktop-read' returns on
+recent Emacs versions, so capture it when Desktop offers to restore it."
+  (let* ((file (project-frame-sessions--entry-snapshot-file entry))
+         (directory (file-name-directory file))
+         (base (file-name-nondirectory file)))
+    (unless (and (project-frame-sessions--safe-direct-child-p
+                  directory (project-frame-sessions--sessions-directory)
+                  (format "\\`%s\\'" (regexp-quote (plist-get entry :id))))
+                 (file-regular-p file)
+                 (not (file-symlink-p file)))
+      (error "Session %s snapshot is missing or unsafe"
+             (plist-get entry :name)))
+    (let ((owner-before (desktop-owner directory)))
+      (when (and owner-before (not (equal owner-before (emacs-pid))))
+      (error "Session %s snapshot is locked by PID %s"
+             (plist-get entry :name) owner-before))
+    (project-frame-sessions--with-desktop-state
+     (lambda ()
+       (let ((desktop-dirname directory) (desktop-restore-frames nil)
+             (desktop-restore-eager t) (desktop-missing-file-warning nil)
+             (desktop-after-read-hook nil) (desktop-saved-frameset nil)
+             (desktop-base-file-name base)
+             captured-frameset)
+         (unwind-protect
+             (progn
+               (cl-letf (((symbol-function 'desktop-restore-frameset)
+                          (lambda ()
+                            (setq captured-frameset desktop-saved-frameset))))
+                 (with-selected-frame frame
+                   (desktop-read directory)))
+               (unless (and (frameset-p captured-frameset)
+                            (= (length (frameset-states captured-frameset)) 1))
+                 (error "Session %s snapshot does not contain exactly one frame"
+                        (plist-get entry :name)))
+               captured-frameset)
+           (when (and (null owner-before)
+                      (equal (desktop-owner directory) (emacs-pid)))
+             (desktop-release-lock directory)))))))))
+
+(defun project-frame-sessions--prepare-restore-target (frame)
+  "Clear FRAME's tabs and layout without killing buffers."
+  (with-selected-frame frame
+    (switch-to-buffer (get-buffer-create "*scratch*"))
+    (when (fboundp 'tab-bar-tabs-set)
+      (tab-bar-tabs-set nil)
+      (set-frame-parameter frame 'current-tab nil))
+    (delete-other-windows)))
+
+(defun project-frame-sessions--restore-frameset (frameset frame)
+  "Restore FRAMESET into exactly FRAME."
+  (with-selected-frame frame
+    (let ((warning-minimum-level :error))
+      (frameset-restore
+       frameset :filters frameset-filter-alist
+       :reuse-frames (lambda (candidate) (eq candidate frame))
+       :cleanup-frames nil :force-display t
+       :force-onscreen (and desktop-restore-forces-onscreen
+                            (display-graphic-p frame))))))
+
+(defun project-frame-sessions--delete-new-frames (before)
+  "Delete frames not present in BEFORE, returning cleanup errors."
+  (let (errors)
+    (dolist (frame (frame-list))
+      (when (and (frame-live-p frame) (not (memq frame before)))
+        (condition-case err (delete-frame frame t)
+          (error (push err errors)))))
+    errors))
+
+(defun project-frame-sessions--restore-entry (entry frame save-current)
+  "Restore ENTRY into FRAME.  SAVE-CURRENT offers to save its current session."
+  (catch 'live
+    (when-let* ((owner (project-frame-sessions--find-live-frame
+                        (plist-get entry :id) frame)))
+      (select-frame-set-input-focus owner)
+      (throw 'live owner))
+    (let* ((before-frames (frame-list))
+           (rollback (frameset-save (list frame) :filters frameset-filter-alist))
+           (old-id (project-frame-sessions--frame-id frame))
+           (old-deleted (frame-parameter frame
+                                         project-frame-sessions--deleted-parameter))
+           (old-root (frame-parameter frame 'project-frame-sessions-root))
+           (old-directory (with-selected-frame frame default-directory))
+           restore-error)
+      (condition-case err
+          (progn
+            (when (and save-current old-id
+                       (yes-or-no-p
+                        (format "Save current session %s before restoring %s? "
+                                (project-frame-sessions--entry-name old-id)
+                                (plist-get entry :name))))
+              (project-frame-sessions--save-frame-internal frame t))
+            (let ((project-frame-sessions--inhibit-dirty t))
+              (let ((frameset
+                     (project-frame-sessions--read-desktop-frameset entry frame)))
+                (project-frame-sessions--prepare-restore-target frame)
+                (project-frame-sessions--restore-frameset frameset frame)))
+            (when (cl-set-difference (frame-list) before-frames)
+              (project-frame-sessions--delete-new-frames before-frames)
+              (error "Session %s unexpectedly created another frame"
+                     (plist-get entry :name)))
+            (set-frame-parameter frame project-frame-sessions--id-parameter
+                                 (plist-get entry :id))
+            (set-frame-parameter frame project-frame-sessions--deleted-parameter nil)
+            (set-frame-parameter frame 'project-frame-sessions-root
+                                 (plist-get entry :root))
+            (when (plist-get entry :root)
+              (with-selected-frame frame
+                (setq default-directory (plist-get entry :root))))
+            (select-frame-set-input-focus frame)
+            (when project-frame-sessions-post-restore-function
+              (run-at-time 0 nil project-frame-sessions-post-restore-function frame))
+            frame)
+        (error (setq restore-error err)))
+      (when restore-error
+        (let ((rollback-errors
+               (project-frame-sessions--delete-new-frames before-frames)))
+          (condition-case err
+              (let ((project-frame-sessions--inhibit-dirty t))
+                (project-frame-sessions--prepare-restore-target frame)
+                (project-frame-sessions--restore-frameset rollback frame)
+                (set-frame-parameter frame project-frame-sessions--id-parameter old-id)
+                (set-frame-parameter frame project-frame-sessions--deleted-parameter
+                                     old-deleted)
+                (set-frame-parameter frame 'project-frame-sessions-root old-root)
+                (with-selected-frame frame
+                  (setq default-directory old-directory))
+                (select-frame-set-input-focus frame))
+            (error (push err rollback-errors)))
+          (when rollback-errors
+            (project-frame-sessions--warn
+             "Session %s restore rollback also failed: %s"
+             (plist-get entry :name)
+             (mapconcat #'error-message-string rollback-errors "; ")))
+          (project-frame-sessions--warn
+           "Session %s restore failed; newly loaded buffers were left alive"
+           (plist-get entry :name))
+          (signal (car restore-error) (cdr restore-error))))
+      frame)))
+
+(defun project-frame-sessions--route-restore (new-frame-p)
+  "Select and restore a session, creating a frame only when NEW-FRAME-P."
+  (let* ((entry (project-frame-sessions--select-active "Restore frame session: "))
+         (owner (project-frame-sessions--find-live-frame
+                 (plist-get entry :id))))
+    (if owner
+        (progn (select-frame-set-input-focus owner) owner)
+      (if new-frame-p
+          (let ((frame (make-frame)))
+            (condition-case err
+                (project-frame-sessions--restore-entry entry frame nil)
+              (error
+               (when (frame-live-p frame)
+                 (let ((project-frame-sessions--delete-suppressed frame))
+                   (delete-frame frame t)))
+               (signal (car err) (cdr err)))))
+        (project-frame-sessions--restore-entry entry (selected-frame) t)))))
+
+;;;###autoload
+(defun project-frame-sessions-restore ()
+  "Select a session, then restore it in a new graphical frame.
+If it is already live, focus that frame.  Canceling selection creates no frame."
+  (interactive)
+  (project-frame-sessions--route-restore t))
+
+;;;###autoload
+(defun project-frame-sessions-restore-current-frame ()
+  "Select a session and restore it into the selected frame.
+The old layout, tabs, identity, root, and directory are rolled back on failure."
+  (interactive)
+  (project-frame-sessions--route-restore nil))
+
+(defun project-frame-sessions--select-entry-for-management (prompt)
+  "Use current frame's session or select one with PROMPT."
+  (or (project-frame-sessions--frame-entry)
+      (project-frame-sessions--select-active prompt)))
+
+;;;###autoload
+(defun project-frame-sessions-rename (&optional new-name)
+  "Rename the current or selected session to unique NEW-NAME.
+The stable ID and snapshot path do not change."
+  (interactive)
+  (let* ((entry (project-frame-sessions--select-entry-for-management
+                 "Rename frame session: "))
+         (id (plist-get entry :id))
+         (name (or new-name
+                   (project-frame-sessions--read-unique-name
+                    (format "Rename session %s to: " (plist-get entry :name))
+                    (plist-get entry :name) id))))
+    (setq name (string-trim name))
+    (unless (project-frame-sessions--valid-name-p name)
+      (user-error "Session name cannot be empty"))
+    (when (project-frame-sessions--name-used-p name id)
+      (user-error "Session name %S is already in use" name))
+    (project-frame-sessions--with-lock
+      (let* ((entries (project-frame-sessions--read-index))
+             (current (project-frame-sessions--find-entry id entries))
+             (renamed (copy-sequence current)))
+        (unless current (error "Session disappeared while renaming"))
+        (setq renamed (plist-put renamed :name name))
+        (project-frame-sessions--write-index
+         (project-frame-sessions--replace-entry renamed entries))))
+    (message "Renamed frame session to %s" name)
+    name))
+
+(defun project-frame-sessions--trash-metadata-file (trash)
+  (expand-file-name "metadata.eld" trash))
+
+(defun project-frame-sessions--trash-entries ()
+  "Return validated, fully soft-deleted entries with :trash paths.
+A trash copy whose ID is still active is an interrupted pre-commit deletion;
+the active session remains authoritative and that copy is not exposed."
+  (let ((parent (project-frame-sessions--trash-directory))
+        (active (project-frame-sessions--read-index)) result)
+    (when (file-directory-p parent)
+      (dolist (directory (directory-files parent t directory-files-no-dot-files-regexp))
+        (when (project-frame-sessions--safe-direct-child-p
+               directory parent "\\`[0-9a-f]\\{64\\}-[0-9a-f]\\{16\\}\\'")
+          (condition-case nil
+              (let* ((data (project-frame-sessions--read-object
+                            (project-frame-sessions--trash-metadata-file directory)))
+                     (entry (plist-get data :entry)))
+                (when (and (eq (plist-get data :kind) 'deleted)
+                           (project-frame-sessions--valid-entry-p entry)
+                           (not (project-frame-sessions--find-entry
+                                 (plist-get entry :id) active)))
+                  (setq entry (copy-sequence entry))
+                  (setq entry (plist-put entry :trash directory))
+                  (push entry result)))
+            (error nil)))))
+    result))
+
+(defun project-frame-sessions--soft-delete-entry (entry)
+  "Soft-delete active ENTRY and return its trash path.
+The snapshot is copied to trash before the index switch, so every crash boundary
+leaves either the active source authoritative or a complete trash copy."
+  (project-frame-sessions--with-lock
+    (let* ((entries (project-frame-sessions--read-index))
+           (id (plist-get entry :id))
+           (current (project-frame-sessions--find-entry id entries))
+           (source (expand-file-name id (project-frame-sessions--sessions-directory)))
+           (source-file (and current
+                             (project-frame-sessions--entry-snapshot-file current)))
+           (token (substring (secure-hash 'sha256
+                                          (format "%s:%s:%s" id (float-time)
+                                                  (random most-positive-fixnum)))
+                             0 16))
+           (trash (expand-file-name (format "%s-%s" id token)
+                                    (project-frame-sessions--trash-directory)))
+           (trash-file (and source-file
+                            (expand-file-name (file-name-nondirectory source-file)
+                                              trash)))
+           index-committed)
+      (unless current (error "Session %s is no longer active" (plist-get entry :name)))
+      (unless (and (project-frame-sessions--safe-direct-child-p
+                    source (project-frame-sessions--sessions-directory)
+                    "\\`[0-9a-f]\\{64\\}\\'")
+                   (file-regular-p source-file) (not (file-symlink-p source-file)))
+        (error "Session %s storage is missing or unsafe" (plist-get entry :name)))
+      (make-directory trash t)
+      (condition-case err
+          (progn
+            (let ((write-region-inhibit-fsync nil))
+              (copy-file source-file trash-file t t))
+            (set-file-modes trash-file #o600)
+            (project-frame-sessions--atomic-write
+             (project-frame-sessions--trash-metadata-file trash)
+             (list :kind 'deleted :entry current :deleted-at (float-time)))
+            (project-frame-sessions--write-index
+             (cl-remove id entries :key (lambda (item) (plist-get item :id))
+                        :test #'equal))
+            (setq index-committed t))
+        (error
+         (unless index-committed (ignore-errors (delete-directory trash t)))
+         (signal (car err) (cdr err))))
+      ;; Failure here is only orphan cleanup: the index and trash copy have
+      ;; already committed the deletion and remain recoverable.
+      (condition-case err
+          (delete-directory source t)
+        (error (project-frame-sessions--warn
+                "Session %s was deleted, but old active storage cleanup failed: %s"
+                (plist-get current :name) (error-message-string err))))
+      (dolist (frame (frame-list))
+        (when (equal id (project-frame-sessions--frame-id frame))
+          (set-frame-parameter frame project-frame-sessions--id-parameter nil)
+          (set-frame-parameter frame project-frame-sessions--deleted-parameter
+                               (list :id id :name (plist-get current :name)
+                                     :trash trash))))
+      (when-let* ((runtime (gethash id project-frame-sessions--runtimes)))
+        (project-frame-sessions--cancel-runtime-timer runtime)
+        (remhash id project-frame-sessions--runtimes))
+      trash)))
+
+;;;###autoload
+(defun project-frame-sessions-delete ()
+  "Soft-delete a selected session without closing frames or killing buffers."
+  (interactive)
+  (let ((entry (project-frame-sessions--select-entry-for-management
+                "Delete frame session: ")))
+    (when (yes-or-no-p (format "Move session %s to recoverable trash? "
+                               (plist-get entry :name)))
+      (project-frame-sessions--soft-delete-entry entry)
+      (message "Soft-deleted frame session %s; use M-x project-frame-sessions-recover to recover it"
+               (plist-get entry :name)))))
+
+;;;###autoload
+(defun project-frame-sessions-delete-all ()
+  "Soft-delete all active sessions after explicit confirmation."
+  (interactive)
+  (let ((entries (project-frame-sessions--read-index)))
+    (unless entries (user-error "No active frame sessions"))
+    (when (yes-or-no-p (format "Move ALL %d sessions to recoverable trash? "
+                               (length entries)))
+      (dolist (entry (copy-sequence entries))
+        (project-frame-sessions--soft-delete-entry entry))
+      (message "Soft-deleted %d frame sessions" (length entries)))))
+
+(defun project-frame-sessions--recover-trash-entry (trash &optional frame)
+  "Recover the entry in TRASH and optionally attach FRAME."
+  (project-frame-sessions--with-lock
+    (let* ((data (project-frame-sessions--read-object
+                  (project-frame-sessions--trash-metadata-file trash)))
+           (entry (copy-sequence (plist-get data :entry)))
+           (id (plist-get entry :id))
+           (name (plist-get entry :name))
+           (entries (project-frame-sessions--read-index))
+           (destination (expand-file-name id
+                                          (project-frame-sessions--sessions-directory))))
+      (unless (and (eq (plist-get data :kind) 'deleted)
+                   (project-frame-sessions--valid-entry-p entry))
+        (error "Invalid deleted session metadata"))
+      (when (project-frame-sessions--find-entry id entries)
+        (error "Session %s is already active" name))
+      (when (project-frame-sessions--find-entry-by-name name entries)
+        (setq name (project-frame-sessions--read-unique-name
+                    (format "Recovered name %S is in use; choose another: " name)
+                    name))
+        (setq entry (plist-put entry :name name)))
+      (when (file-exists-p destination)
+        ;; This can only be package-owned, unindexed storage left by a crash
+        ;; after the deletion's index switch.  The complete trash copy wins.
+        (unless (project-frame-sessions--safe-direct-child-p
+                 destination (project-frame-sessions--sessions-directory)
+                 "\\`[0-9a-f]\\{64\\}\\'")
+          (error "Cannot recover %s: unsafe destination exists" name))
+        (delete-directory destination t))
+      ;; Keep TRASH authoritative until the index commit.  At every failure or
+      ;; crash boundary recovery metadata therefore remains discoverable; the
+      ;; startup cleanup reconciles any duplicate destination copy.
+      (condition-case err
+          (progn
+            (make-directory destination t)
+            (copy-directory trash destination t t t)
+            (delete-file (project-frame-sessions--trash-metadata-file destination))
+            (project-frame-sessions--write-index (cons entry entries)))
+        (error
+         (when (and (file-directory-p destination)
+                    (not (file-symlink-p destination)))
+           (ignore-errors (delete-directory destination t)))
+         (signal (car err) (cdr err))))
+      (condition-case err
+          (delete-directory trash t)
+        (error
+         (project-frame-sessions--warn
+          "Session %s was recovered, but trash cleanup failed: %s"
+          name (error-message-string err))))
+      (when frame
+        (set-frame-parameter frame project-frame-sessions--id-parameter id)
+        (set-frame-parameter frame project-frame-sessions--deleted-parameter nil))
+      entry)))
+
+(defun project-frame-sessions--recovery-stages ()
+  "Return validated interrupted save candidates."
+  (let ((parent (project-frame-sessions--recovery-directory)) result)
+    (when (file-directory-p parent)
+      (dolist (stage (directory-files parent t directory-files-no-dot-files-regexp))
+        (when (project-frame-sessions--safe-direct-child-p
+               stage parent "\\`\\.stage-[0-9a-f]\\{64\\}-[0-9a-f]\\{16\\}\\'")
+          (condition-case nil
+              (let* ((data (project-frame-sessions--read-object
+                            (expand-file-name "metadata.eld" stage)))
+                     (entry (plist-get data :entry))
+                     (target (expand-file-name (plist-get data :target)
+                                               project-frame-sessions-directory))
+                     (staged (expand-file-name project-frame-sessions--desktop-name
+                                               stage))
+                     (file (if (file-exists-p target) target staged)))
+                (if (and (eq (plist-get data :kind) 'save)
+                         (project-frame-sessions--valid-entry-p entry)
+                         (project-frame-sessions--valid-snapshot-p
+                          (plist-get data :target) (plist-get entry :id))
+                         (file-exists-p file)
+                         (project-frame-sessions--validate-desktop file)
+                         (not (equal (plist-get data :target)
+                                     (when-let* ((active
+                                                  (project-frame-sessions--find-entry
+                                                   (plist-get entry :id))))
+                                       (plist-get active :snapshot)))))
+                    (progn
+                      (setq entry (copy-sequence entry))
+                      (setq entry (plist-put entry :stage stage))
+                      (setq entry (plist-put entry :recovery-file file))
+                      (push entry result))
+                  ;; A committed marker or an unpromoted invalid stage is stale.
+                  (let ((active (project-frame-sessions--find-entry
+                                 (plist-get entry :id))))
+                    (when (or (not (file-exists-p target))
+                              (equal (plist-get data :target)
+                                     (and active (plist-get active :snapshot))))
+                      (delete-directory stage t)))))
+            (error
+             ;; Clearly unreadable package stages are incomplete, not history.
+             (ignore-errors (delete-directory stage t)))))))
+    result))
+
+(defun project-frame-sessions--cleanup-interrupted-deletions ()
+  "Reconcile safe leftovers from interrupted soft deletions.
+Caller holds the transaction lock.  An active index entry wins over a duplicate
+trash copy; a complete trash entry wins over unindexed active storage."
+  (let ((parent (project-frame-sessions--trash-directory))
+        (active (project-frame-sessions--read-index)))
+    (when (file-directory-p parent)
+      (dolist (trash (directory-files parent t directory-files-no-dot-files-regexp))
+        (when (project-frame-sessions--safe-direct-child-p
+               trash parent "\\`[0-9a-f]\\{64\\}-[0-9a-f]\\{16\\}\\'")
+          (condition-case nil
+              (let* ((data (project-frame-sessions--read-object
+                            (project-frame-sessions--trash-metadata-file trash)))
+                     (entry (plist-get data :entry))
+                     (id (and entry (plist-get entry :id)))
+                     (source (and id (expand-file-name
+                                      id (project-frame-sessions--sessions-directory)))))
+                (when (and (eq (plist-get data :kind) 'deleted)
+                           (project-frame-sessions--valid-entry-p entry))
+                  (if (project-frame-sessions--find-entry id active)
+                      (delete-directory trash t)
+                    (when (and (file-exists-p source)
+                               (project-frame-sessions--safe-direct-child-p
+                                source (project-frame-sessions--sessions-directory)
+                                "\\`[0-9a-f]\\{64\\}\\'"))
+                      (delete-directory source t)))))
+            (error nil)))))))
+
+(defun project-frame-sessions--scan-recovery ()
+  "Scan package transaction artifacts and warn once when recovery is available."
+  (ignore-errors
+    (project-frame-sessions--with-lock
+      (project-frame-sessions--cleanup-interrupted-deletions)))
+  (let ((candidates (project-frame-sessions--recovery-stages)))
+    (when (and candidates (not project-frame-sessions--recovery-warning-shown))
+      (setq project-frame-sessions--recovery-warning-shown t)
+      (project-frame-sessions--warn
+       "%d interrupted session save(s) can be recovered with M-x project-frame-sessions-recover"
+       (length candidates)))
+    candidates))
+
+(defun project-frame-sessions--recover-stage-entry (candidate)
+  "Commit interrupted save CANDIDATE as the active snapshot."
+  (project-frame-sessions--with-lock
+    (let* ((entry (copy-sequence candidate))
+           (stage (plist-get entry :stage))
+           (source (plist-get entry :recovery-file))
+           (target (project-frame-sessions--entry-snapshot-file entry))
+           (entries (project-frame-sessions--read-index))
+           (id (plist-get entry :id))
+           (name (plist-get entry :name)))
+      (setq entry (plist-put entry :stage nil))
+      (setq entry (plist-put entry :recovery-file nil))
+      (when-let* ((collision (project-frame-sessions--find-entry-by-name name entries)))
+        (unless (equal id (plist-get collision :id))
+          (setq name (project-frame-sessions--read-unique-name
+                      (format "Recovery name %S is in use; choose another: " name)
+                      name id))
+          (setq entry (plist-put entry :name name))))
+      (let ((moved (not (equal source target))))
+        (when moved
+          (make-directory (file-name-directory target) t)
+          (rename-file source target))
+        (condition-case err
+            (project-frame-sessions--write-index
+             (project-frame-sessions--replace-entry entry entries))
+          (error
+           (when (and moved (file-exists-p target))
+             (ignore-errors (rename-file target source)))
+           (signal (car err) (cdr err)))))
+      (ignore-errors (delete-directory stage t))
+      (project-frame-sessions--cleanup-session-snapshots entry)
+      entry)))
+
+;;;###autoload
+(defun project-frame-sessions-recover ()
+  "Recover a soft-deleted session or a validated interrupted save.
+Recovery never replaces the committed snapshot automatically; this command is
+the explicit user choice to make recovered data active."
+  (interactive)
+  (let* ((trash (project-frame-sessions--trash-entries))
+         (stages (project-frame-sessions--scan-recovery))
+         choices)
+    (dolist (entry trash)
+      (push (cons (project-frame-sessions--candidate-label entry 'deleted)
+                  (cons 'trash entry)) choices))
+    (dolist (entry stages)
+      (push (cons (project-frame-sessions--candidate-label entry 'recovery)
+                  (cons 'stage entry)) choices))
+    (unless choices (user-error "No deleted or interrupted sessions to recover"))
+    (let* ((selection (completing-read "Recover frame session: " choices nil t))
+           (candidate (cdr (assoc selection choices)))
+           (entry (pcase (car candidate)
+                    ('trash (project-frame-sessions--recover-trash-entry
+                             (plist-get (cdr candidate) :trash)))
+                    ('stage (project-frame-sessions--recover-stage-entry
+                             (cdr candidate))))))
+      (message "Recovered frame session %s" (plist-get entry :name))
+      entry)))
+
+;;;###autoload
+(defun project-frame-sessions-purge-deleted ()
+  "Permanently remove all soft-deleted session data after confirmation."
+  (interactive)
+  (let ((entries (project-frame-sessions--trash-entries)))
+    (unless entries (user-error "No soft-deleted frame sessions"))
+    (when (yes-or-no-p
+           (format "Permanently purge %d deleted session(s)? This cannot be undone. "
+                   (length entries)))
+      (project-frame-sessions--with-lock
+        (dolist (entry entries)
+          (let ((trash (plist-get entry :trash)))
+            (unless (project-frame-sessions--safe-direct-child-p
+                     trash (project-frame-sessions--trash-directory)
+                     "\\`[0-9a-f]\\{64\\}-[0-9a-f]\\{16\\}\\'")
+              (error "Refusing unsafe trash path %s" trash))
+            (delete-directory trash t)
+            (let ((source (expand-file-name
+                           (plist-get entry :id)
+                           (project-frame-sessions--sessions-directory))))
+              (when (and (file-exists-p source)
+                         (project-frame-sessions--safe-direct-child-p
+                          source (project-frame-sessions--sessions-directory)
+                          "\\`[0-9a-f]\\{64\\}\\'"))
+                (delete-directory source t))))))
+      (message "Permanently purged %d deleted session(s)" (length entries)))))
+
+(defun project-frame-sessions--delete-frame-hook (frame)
+  "Save enrolled FRAME before deletion, aborting deletion on failure."
+  (when (and project-frame-sessions-mode
+             (not project-frame-sessions--shutdown)
+             (not (eq frame project-frame-sessions--delete-suppressed))
+             (project-frame-sessions--frame-id frame))
+    (project-frame-sessions--save-frame-internal frame t)))
+
+;;;###autoload
+(defun project-frame-sessions-delete-frame (&optional frame before-delete)
+  "Save and close enrolled FRAME.
+After saving, call optional BEFORE-DELETE with FRAME before closing it.  A
+failed save or callback leaves the frame open."
+  (interactive)
+  (let ((frame (or frame (selected-frame))))
+    (unless (project-frame-sessions--frame-id frame)
+      (user-error "Frame is not enrolled in a session"))
+    (project-frame-sessions--save-frame-internal frame t)
+    (when before-delete
+      (funcall before-delete frame))
+    (let ((project-frame-sessions--delete-suppressed frame))
+      (delete-frame frame))))
+
+(defun project-frame-sessions--dirty-frames ()
+  "Return enrolled live frames whose sessions are dirty."
+  (cl-remove-if-not
+   (lambda (frame)
+     (when-let* ((id (project-frame-sessions--frame-id frame))
+                 (runtime (project-frame-sessions--runtime id)))
+       (> (project-frame-sessions--runtime-dirty runtime)
+          (project-frame-sessions--runtime-saved runtime))))
+   (frame-list)))
+
+(defun project-frame-sessions--shutdown-attempt ()
+  "Save all dirty enrolled sessions and return failure (NAME . ERROR) pairs."
+  (let (failures)
+    (dolist (frame (project-frame-sessions--dirty-frames))
+      (let* ((id (project-frame-sessions--frame-id frame))
+             (name (project-frame-sessions--entry-name id)))
+        (condition-case err
+            (project-frame-sessions--save-frame-internal frame t)
+          (error (push (cons name (error-message-string err)) failures)))))
+    (nreverse failures)))
+
+(defun project-frame-sessions--query-exit ()
+  "Strict shutdown preflight with retry, cancel, and deliberate override."
+  (let ((done nil) (allow nil))
+    (while (not done)
+      (let ((failures (project-frame-sessions--shutdown-attempt)))
+        (if (null failures)
+            (setq done t allow t project-frame-sessions--preflight-complete t)
+          (project-frame-sessions--warn
+           "Shutdown save failed: %s. Last committed snapshots remain safe."
+           (mapconcat (lambda (failure)
+                        (format "%s: %s" (car failure) (cdr failure)))
+                      failures "; "))
+          (pcase (read-char-choice
+                  "Session saves failed: [r]etry, [c]ancel shutdown, or [q]uit without saving? "
+                  '(?r ?c ?q))
+            (?r nil)
+            (?c (setq done t allow nil))
+            (?q (if (yes-or-no-p
+                     "Really quit without saving these dirty frame sessions? ")
+                    (setq done t allow t
+                          project-frame-sessions--preflight-complete t)
+                  nil))))))
+    allow))
+
+(defun project-frame-sessions--exit ()
+  "Best-effort final shutdown fallback."
+  (setq project-frame-sessions--shutdown t)
+  (when (timerp project-frame-sessions--idle-timer)
+    (cancel-timer project-frame-sessions--idle-timer))
+  (unless project-frame-sessions--preflight-complete
+    (dolist (frame (project-frame-sessions--dirty-frames))
+      (condition-case err
+          (project-frame-sessions--save-frame-internal frame t)
+        (error
+         (project-frame-sessions--warn
+          "Final save for %s failed: %s"
+          (project-frame-sessions--entry-name
+           (project-frame-sessions--frame-id frame))
+          (error-message-string err)))))))
+
+(defun project-frame-sessions--install-hooks ()
+  "Install dirty, close, and shutdown hooks idempotently."
+  (add-hook 'delete-frame-functions #'project-frame-sessions--delete-frame-hook)
+  (add-hook 'kill-emacs-query-functions #'project-frame-sessions--query-exit)
+  (add-hook 'kill-emacs-hook #'project-frame-sessions--exit)
+  (add-hook 'buffer-list-update-hook #'project-frame-sessions--event-dirty)
+  (add-hook 'window-state-change-functions #'project-frame-sessions--event-dirty)
+  (when (boundp 'tab-bar-tab-post-open-functions)
+    (add-hook 'tab-bar-tab-post-open-functions #'project-frame-sessions--event-dirty))
+  (when (boundp 'tab-bar-tab-post-select-functions)
+    (add-hook 'tab-bar-tab-post-select-functions #'project-frame-sessions--event-dirty))
+  (advice-add 'tab-bar-close-tab :after #'project-frame-sessions--event-dirty)
+  (advice-add 'tab-bar-rename-tab :after #'project-frame-sessions--event-dirty))
+
+(defun project-frame-sessions--remove-hooks ()
+  "Remove all package hooks and advice idempotently."
+  (remove-hook 'delete-frame-functions #'project-frame-sessions--delete-frame-hook)
+  (remove-hook 'kill-emacs-query-functions #'project-frame-sessions--query-exit)
+  (remove-hook 'kill-emacs-hook #'project-frame-sessions--exit)
+  (remove-hook 'buffer-list-update-hook #'project-frame-sessions--event-dirty)
+  (remove-hook 'window-state-change-functions #'project-frame-sessions--event-dirty)
+  (when (boundp 'tab-bar-tab-post-open-functions)
+    (remove-hook 'tab-bar-tab-post-open-functions
+                 #'project-frame-sessions--event-dirty))
+  (when (boundp 'tab-bar-tab-post-select-functions)
+    (remove-hook 'tab-bar-tab-post-select-functions
+                 #'project-frame-sessions--event-dirty))
+  (advice-remove 'tab-bar-close-tab #'project-frame-sessions--event-dirty)
+  (advice-remove 'tab-bar-rename-tab #'project-frame-sessions--event-dirty))
+
+;;;###autoload
+(define-minor-mode project-frame-sessions-mode
+  "Globally maintain explicitly enrolled graphical frame sessions.
+The mode never restores at startup and never enrolls an ordinary non-project
+frame merely because the mode is enabled."
+  :global t
+  (project-frame-sessions--remove-hooks)
+  (when (timerp project-frame-sessions--idle-timer)
+    (cancel-timer project-frame-sessions--idle-timer))
+  (setq project-frame-sessions--idle-timer nil
+        project-frame-sessions--shutdown nil
+        project-frame-sessions--preflight-complete nil)
+  (maphash (lambda (_id runtime)
+             (project-frame-sessions--cancel-runtime-timer runtime))
+           project-frame-sessions--runtimes)
+  (when project-frame-sessions-mode
+    (project-frame-sessions--install-hooks)
+    (project-frame-sessions--scan-recovery)
+    (maphash
+     (lambda (id runtime)
+       (when (> (project-frame-sessions--runtime-dirty runtime)
+                (project-frame-sessions--runtime-saved runtime))
+         (project-frame-sessions--schedule id)))
+     project-frame-sessions--runtimes)
+    (when project-frame-sessions-autosave-interval
+      (setq project-frame-sessions--idle-timer
+            (run-with-idle-timer project-frame-sessions-autosave-interval t
+                                 #'project-frame-sessions--idle-save)))))
+
+(provide 'project-frame-sessions)
+;;; project-frame-sessions.el ends here

@@ -91,7 +91,9 @@
   :custom
   (exec-path-from-shell-variables '("PATH" "MANPATH" "PNPM_HOME"))
   :config
-  (exec-path-from-shell-initialize))
+  (exec-path-from-shell-initialize)
+  ;; Mason installs language-server shims here, outside the login-shell PATH.
+  (my/add-to-path (expand-file-name "mason/bin" user-emacs-directory)))
 
 ;;; Core Emacs defaults
 (use-package emacs
@@ -104,6 +106,7 @@
            (conf-mode . display-line-numbers-mode))
     :config
     (setq display-line-numbers-type 'relative)
+    (setq-default display-line-numbers-width 3)
     :bind
     ("C-x L" . display-line-numbers-mode))
 
@@ -121,7 +124,6 @@
     (setq native-comp-async-report-warnings-errors nil))
   (when (boundp 'native-comp-deferred-compilation)
     (setq native-comp-deferred-compilation t))
-
 
   (setq-default fill-column 1000
                 indent-tabs-mode nil
@@ -184,6 +186,13 @@
         auto-window-vscroll nil
         fast-but-imprecise-scrolling t
         scroll-preserve-screen-position t)
+
+  (setq initial-buffer-choice nil
+        help-window-select t
+        initial-major-mode 'text-mode
+        custom-safe-themes t)
+
+  (auto-save-visited-mode 1)
 
   (when (fboundp 'pixel-scroll-precision-mode)
     (pixel-scroll-precision-mode 1))
@@ -260,23 +269,13 @@
             (or (frame-parameter frame 'default-directory)
                 default-directory)))))))
 
-  (defun my/update-all-frame-names ()
-    "Update names for all live frames."
-    (dolist (frame (frame-list))
-      (my/update-frame-name frame)))
-
   (defun my/update-frame-name-for-window (window)
     "Update WINDOW's frame name from WINDOW's buffer."
     (when (window-live-p window)
       (my/update-frame-name (window-frame window))))
 
-  (defun my/update-frame-names-after-desktop-read ()
-    "Update frame names after `desktop-read' restores frames and buffers."
-    (run-at-time 0 nil #'my/update-all-frame-names))
-
   (add-hook 'window-buffer-change-functions #'my/update-frame-name-for-window)
   (add-hook 'after-change-major-mode-hook #'my/update-frame-name)
-  (add-hook 'desktop-after-read-hook #'my/update-frame-names-after-desktop-read)
   (my/update-frame-name)
 
   (defun my/new-workflow-frame ()
@@ -295,7 +294,7 @@
             (tabspaces-generate-descriptive-tab-name directory existing-tab-names))
           (file-name-nondirectory (directory-file-name directory)))))
 
-  (defun my/new-project-frame (directory)
+  (cl-defun my/new-project-frame (directory)
     "Create a new frame rooted at project DIRECTORY."
     (interactive
      (list (if (fboundp 'project-prompt-project-dir)
@@ -303,9 +302,16 @@
              (read-directory-name "Project directory: "))))
     (let* ((project-directory (file-name-as-directory (expand-file-name directory)))
            (default-directory project-directory))
+      (when-let* ((existing
+                   (and (fboundp 'project-frame-sessions--find-live-frame)
+                        (project-frame-sessions--find-live-frame project-directory))))
+        (select-frame-set-input-focus existing)
+        (cl-return-from my/new-project-frame existing))
       (when (fboundp 'project--ensure-read-project-list)
         (project--ensure-read-project-list))
       (select-frame-set-input-focus (make-frame))
+      (when (fboundp 'project-frame-sessions-set-frame-root)
+        (project-frame-sessions-set-frame-root project-directory))
       ;; A newly-created frame can inherit the selected frame's tab-bar state.
       ;; Reset it to a single scratch tab, then turn that tab into the project
       ;; workspace directly.  Avoid `tabspaces-open-or-create-project-and-workspace'
@@ -333,14 +339,25 @@
       (when (fboundp 'tabspaces-reset-buffer-list)
         (tabspaces-reset-buffer-list))))
 
-  (defun my/change-frame-default-directory (directory)
+  (cl-defun my/change-frame-default-directory (directory)
     "Change the default directory associated with the current frame to DIRECTORY."
     (interactive
      (list (read-directory-name
             "Frame default directory: "
             (or (frame-parameter nil 'default-directory) default-directory))))
     (let ((directory (file-name-as-directory (expand-file-name directory))))
+      (when-let* ((existing
+                   (and (fboundp 'project-frame-sessions--find-live-frame)
+                        (project-frame-sessions--find-live-frame
+                         directory (selected-frame)))))
+        (select-frame-set-input-focus existing)
+        (cl-return-from my/change-frame-default-directory existing))
+      (when (and (fboundp 'project-frame-sessions-save)
+                 (frame-parameter nil 'project-frame-sessions-root))
+        (project-frame-sessions-save))
       (set-frame-parameter nil 'default-directory directory)
+      (when (fboundp 'project-frame-sessions-set-frame-root)
+        (project-frame-sessions-set-frame-root directory))
       ;; `default-directory' is buffer-local; update the selected buffer so
       ;; commands run from it immediately use the new frame directory.
       (setq default-directory directory)
@@ -439,30 +456,23 @@ not persisted as a utility workspace when Emacs exits."
     (dolist (frame (frame-list))
       (my/close-utility-tabs-in-frame frame)))
 
-  (defun my/close-utility-tabs-before-desktop-save ()
-    "Close transient utility tabs before `desktop' serializes frames/tabs."
-    (my/close-utility-tabs-in-all-frames))
-
-  (defun my/close-utility-tabs-before-delete-frame (frame)
-    "Close dedicated utility tabs in FRAME before it is deleted."
-    (my/close-utility-tabs-in-frame frame))
-
-  (unless noninteractive
-    (add-hook 'delete-frame-functions #'my/close-utility-tabs-before-delete-frame)
-    (add-hook 'kill-emacs-hook #'my/close-utility-tabs-in-all-frames -100))
-
   (defun my/delete-frame-or-emacs (&optional kill-local-buffers)
     "Delete current frame, optionally killing frame-local buffers.
 On the last frame, quit Emacs.  With prefix argument KILL-LOCAL-BUFFERS,
 kill buffers that are local to the current frame before deleting it."
     (interactive "P")
     (if (cdr (frame-list))
-        (progn
-          (my/close-utility-tabs-in-frame (selected-frame))
+        (if (fboundp 'project-frame-sessions-delete-frame)
+            (project-frame-sessions-delete-frame
+             (selected-frame)
+             (lambda (frame)
+               (when kill-local-buffers
+                 (my/kill-frame-local-buffers frame))))
           (when kill-local-buffers
             (my/kill-frame-local-buffers (selected-frame)))
           (delete-frame))
-      (my/close-utility-tabs-in-all-frames)
+      ;; Session save preflight runs from `kill-emacs-query-functions'.
+      ;; Do not mutate tabs or buffers before that preflight can veto exit.
       (save-buffers-kill-emacs)))
 
   (defun my/delete-frame-kill-local-buffers-command ()
@@ -516,6 +526,9 @@ kill buffers that are local to the current frame before deleting it."
    ("C-x 5 d" . my/change-frame-default-directory)
    ("C-x 5 r" . my/rename-frame)
    ("C-x 5 s" . my/switch-frame)
+   ("C-x 5 S" . project-frame-sessions-save)
+   ("C-x 5 R" . project-frame-sessions-restore)
+   ("C-x 5 D" . project-frame-sessions-delete)
    ("C-x 5 0" . my/delete-frame-or-emacs)
    ("C-x 5 K" . my/delete-frame-kill-local-buffers-command)
    ("C-x 5 F" . toggle-frame-fullscreen)
@@ -564,7 +577,7 @@ kill buffers that are local to the current frame before deleting it."
     "Bind C-c 1..C-c 9 in MAP to switch to tab-bar tabs 1..9."
     (dotimes (index 9)
       (let ((number (1+ index)))
-        (define-key map (kbd (format "C-c %d" number))
+        (define-key map (kbd (format "M-%d" number))
                     (lambda ()
                       (interactive)
                       (my/tab-bar-select-tab-by-number number))))))
@@ -576,10 +589,9 @@ kill buffers that are local to the current frame before deleting it."
     (tab-bar-history-mode 1))
   :bind (:map my/override-map
               ("C-M-i" . tab-bar-switch-to-prev-tab)
-              ("<backtab>" . tab-bar-switch-to-prev-tab)
               ("C-M-<tab>" . tab-bar-switch-to-prev-tab)
               ("C-M-o" . tab-bar-switch-to-next-tab)
-              ("C-x t l" . my/tab-bar-switch-to-recent-or-prev-tab)))
+              ("C-<tab>" . my/tab-bar-switch-to-recent-or-prev-tab)))
 
 (use-package tabspaces
   :ensure t
@@ -1527,15 +1539,15 @@ With prefix argument NEW, always create a new eshell buffer."
   :bind (:map my/override-map
               ("M-e" . harpoon-quick-menu-hydra)
               ("M-0" . harpoon-add-file)
-              ("M-1" . harpoon-go-to-1)
-              ("M-2" . harpoon-go-to-2)
-              ("M-3" . harpoon-go-to-3)
-              ("M-4" . harpoon-go-to-4)
-              ("M-5" . harpoon-go-to-5)
-              ("M-6" . harpoon-go-to-6)
-              ("M-7" . harpoon-go-to-7)
-              ("M-8" . harpoon-go-to-8)
-              ("M-9" . harpoon-go-to-9)))
+              ("C-c 1" . harpoon-go-to-1)
+              ("C-c 2" . harpoon-go-to-2)
+              ("C-c 3" . harpoon-go-to-3)
+              ("C-c 4" . harpoon-go-to-4)
+              ("C-c 5" . harpoon-go-to-5)
+              ("C-c 6" . harpoon-go-to-6)
+              ("C-c 7" . harpoon-go-to-7)
+              ("C-c 8" . harpoon-go-to-8)
+              ("C-c 9" . harpoon-go-to-9)))
 
 (use-package emmet-mode
   :ensure t
@@ -1763,30 +1775,18 @@ opened without hiding or toggling the pi buffer."
 
 ;;; Sessions and persistence
 
-(use-package desktop
+(use-package project-frame-sessions
   :ensure nil
+  :load-path "packages/project-frame-sessions"
   :custom
-  (desktop-path (list user-emacs-directory))
-  (desktop-dirname user-emacs-directory)
-  (desktop-base-file-name "desktop.el")
-  (desktop-save t)
-  (desktop-load-locked-desktop t)
-  (desktop-restore-eager 5)
-  (desktop-auto-save-timeout 300)
+  (project-frame-sessions-frame-buffer-function #'my/frame-buffer-list)
+  (project-frame-sessions-tab-omit-function #'my/auto-close-tab-p)
+  (project-frame-sessions-post-restore-function #'my/update-frame-name)
   :config
-  ;; Keep frame restoration enabled.  `my/update-frame-name' is defensive while
-  ;; frameset is rebuilding frames/windows during desktop restore.
-  (when (boundp 'desktop-restore-frames)
-    (setq desktop-restore-frames t))
-  ;; Do not persist transient utility workspaces
-  (unless noninteractive
-    (add-hook 'desktop-save-hook #'my/close-utility-tabs-before-desktop-save))
   (setq desktop-buffers-not-to-save
         (concat "\\`\\*\\(?:vterm\\|eshell\\|magit\\|pi-coding-agent\\|pi-agent\\).*\\*\\(?:<[0-9]+>\\)?\\'"
-                (when desktop-buffers-not-to-save
-                  (concat "\\|" desktop-buffers-not-to-save))))
-  (unless noninteractive
-    (desktop-save-mode 1)))
+                (when desktop-buffers-not-to-save (concat "\\|" desktop-buffers-not-to-save))))
+  (unless noninteractive (project-frame-sessions-mode 1)))
 
 ;;; Org mode
 (use-package org-tempo
