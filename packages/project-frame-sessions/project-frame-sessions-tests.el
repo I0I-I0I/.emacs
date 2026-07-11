@@ -321,9 +321,10 @@
 
 (ert-deftest project-frame-sessions-restore-selects-before-creating-frame ()
   (let (order)
-    (cl-letf (((symbol-function 'project-frame-sessions--select-active)
+    (cl-letf (((symbol-function 'project-frame-sessions--select-restore-candidate)
                (lambda (_) (push 'select order)
-                 (project-frame-sessions-tests--entry)))
+                 (list :type 'session
+                       :entry (project-frame-sessions-tests--entry))))
               ((symbol-function 'project-frame-sessions--find-live-frame) #'ignore)
               ((symbol-function 'make-frame) (lambda () (push 'make order) 'new))
               ((symbol-function 'project-frame-sessions--restore-entry)
@@ -333,8 +334,9 @@
 
 (ert-deftest project-frame-sessions-open-session-is-focused-without-new-frame ()
   (let ((owner 'owner) focused made)
-    (cl-letf (((symbol-function 'project-frame-sessions--select-active)
-               (lambda (_) (project-frame-sessions-tests--entry)))
+    (cl-letf (((symbol-function 'project-frame-sessions--select-restore-candidate)
+               (lambda (_) (list :type 'session
+                                  :entry (project-frame-sessions-tests--entry))))
               ((symbol-function 'project-frame-sessions--find-live-frame) (lambda (&rest _) owner))
               ((symbol-function 'select-frame-set-input-focus) (lambda (frame) (setq focused frame)))
               ((symbol-function 'make-frame) (lambda () (setq made t))))
@@ -344,8 +346,9 @@
 
 (ert-deftest project-frame-sessions-new-frame-is-deleted-after-restore-failure ()
   (let ((fresh 'fresh) deleted)
-    (cl-letf (((symbol-function 'project-frame-sessions--select-active)
-               (lambda (_) (project-frame-sessions-tests--entry)))
+    (cl-letf (((symbol-function 'project-frame-sessions--select-restore-candidate)
+               (lambda (_) (list :type 'session
+                                  :entry (project-frame-sessions-tests--entry))))
               ((symbol-function 'project-frame-sessions--find-live-frame) #'ignore)
               ((symbol-function 'make-frame) (lambda () fresh))
               ((symbol-function 'project-frame-sessions--restore-entry)
@@ -784,6 +787,63 @@
                (expand-file-name
                 (format "sessions/%s/desktop-%s.el" id token)
                 project-frame-sessions-directory))))))
+
+(ert-deftest project-frame-sessions-restore-choices-put-sessions-before-projects ()
+  (project-frame-sessions-tests--with-store
+    (let* ((root (make-temp-file "pfs-project-" t))
+           (entry (project-frame-sessions-tests--entry nil "Saved" nil)))
+      (unwind-protect
+          (progn
+            (project-frame-sessions--write-index (list entry))
+            (project-frame-sessions-tests--put-snapshot entry)
+            (cl-letf (((symbol-function 'project-frame-sessions--known-project-roots)
+                       (lambda () (list root)))
+                      ((symbol-function 'project-frame-sessions--project-name-at-root)
+                       (lambda (_) "Known")))
+              (let ((choices (project-frame-sessions--restore-choices)))
+                (should (equal (mapcar #'car choices) '("Saved" "Known")))
+                (should (eq (plist-get (cdr (car choices)) :type) 'session))
+                (should (eq (plist-get (cdr (cadr choices)) :type) 'project)))))
+        (ignore-errors (delete-directory root t))))))
+
+(ert-deftest project-frame-sessions-project-discovery-filters-and-deduplicates-roots ()
+  (let* ((root (make-temp-file "pfs-project-" t))
+         (alias (expand-file-name "../" (expand-file-name "child/" root))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-frame-sessions--known-project-roots)
+                   (lambda () (list root alias "relative" "/missing/pfs/"
+                                    "/ssh:host:/tmp/" 42)))
+                  ((symbol-function 'project-frame-sessions--project-name-at-root)
+                   (lambda (_) "Known")))
+          (let ((projects (project-frame-sessions--unsaved-projects nil)))
+            (should (= (length projects) 1))
+            (should (equal (plist-get (car projects) :root)
+                           (project-frame-sessions--canonical-root root)))))
+      (ignore-errors (delete-directory root t)))))
+
+(ert-deftest project-frame-sessions-saved-root-suppresses-remembered-project ()
+  (let* ((root (make-temp-file "pfs-project-" t))
+         (entry (project-frame-sessions-tests--entry nil "Saved" root)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-frame-sessions--known-project-roots)
+                   (lambda () (list (concat root "/../"
+                                             (file-name-nondirectory root))))))
+          (should-not (project-frame-sessions--unsaved-projects (list entry))))
+      (ignore-errors (delete-directory root t)))))
+
+(ert-deftest project-frame-sessions-project-route-leaves-new-frame-on-failure ()
+  (let ((fresh 'fresh) deleted made)
+    (cl-letf (((symbol-function 'project-frame-sessions--select-restore-candidate)
+               (lambda (_) '(:type project :root "/tmp/" :name "Tmp")))
+              ((symbol-function 'make-frame)
+               (lambda () (setq made t) fresh))
+              ((symbol-function 'project-frame-sessions--enroll-project)
+               (lambda (&rest _) (error "save failed")))
+              ((symbol-function 'delete-frame)
+               (lambda (&rest _) (setq deleted t))))
+      (should-error (project-frame-sessions-restore))
+      (should made)
+      (should-not deleted))))
 
 (provide 'project-frame-sessions-tests)
 ;;; project-frame-sessions-tests.el ends here

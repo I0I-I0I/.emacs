@@ -9,7 +9,10 @@
 
 ;; Save one explicitly enrolled graphical frame as a named session.  Session
 ;; identity is independent of `project.el'; project discovery is optional and is
-;; used only to suggest a root and name.  Desktop saves buffers, and Frameset
+;; used to suggest a root and name.  Restore completion also appends remembered
+;; local projects that do not yet have a saved session; selecting one opens its
+;; root in Dired and enrolls that frame transactionally.  Desktop saves buffers,
+;; and Frameset
 ;; saves the complete tab-bar workspace.  Tabspaces' frame-local buffer lists
 ;; are represented by the built-in tab parameters and are therefore preserved
 ;; without copying Tabspaces globals.
@@ -33,6 +36,10 @@
 (defvar write-region-inhibit-fsync)
 
 (declare-function project-root "project" (project))
+(declare-function project-known-project-roots "project" ())
+(declare-function project-name "project" (project))
+(declare-function project-current "project" (&optional maybe-prompt directory))
+(declare-function dired "dired" (dirname &optional switches))
 (declare-function tabspaces--buffer-list "tabspaces" (&optional frame tabnum))
 
 (defgroup project-frame-sessions nil
@@ -643,17 +650,23 @@ EXCEPT-ID is ignored during uniqueness checking."
          (t (setq name candidate)))))
     name))
 
-(defun project-frame-sessions--first-save-metadata (frame)
-  "Return (:name NAME :root ROOT) for FRAME's first save."
-  (let* ((root (ignore-errors (project-frame-sessions--discover-root frame)))
-         (project-name (and root
-                            (file-name-nondirectory (directory-file-name root))))
+(defun project-frame-sessions--first-save-metadata (frame &optional explicit)
+  "Return (:name NAME :root ROOT) for FRAME's first save.
+When EXPLICIT is non-nil, its root and proposed name are authoritative."
+  (let* ((root (if explicit (plist-get explicit :root)
+                 (ignore-errors (project-frame-sessions--discover-root frame))))
+         (explicit-name (and explicit (plist-get explicit :name)))
+         (project-name (if explicit explicit-name
+                         (and root
+                              (file-name-nondirectory
+                               (directory-file-name root)))))
          (frame-name (format "%s" (or (frame-parameter frame 'name) "")))
          (suggestion (cond
                       ((and (project-frame-sessions--valid-name-p project-name)
                             (not (project-frame-sessions--name-used-p project-name)))
-                       project-name)
-                      ((and (not (project-frame-sessions--generic-frame-name-p frame-name))
+                       (string-trim project-name))
+                      ((and (not explicit)
+                            (not (project-frame-sessions--generic-frame-name-p frame-name))
                             (not (project-frame-sessions--name-used-p frame-name)))
                        frame-name))))
     (list :name (or suggestion
@@ -852,8 +865,10 @@ Return the committed entry.  Caller holds the package lock."
     (set-frame-parameter frame project-frame-sessions--deleted-parameter nil)
     committed))
 
-(cl-defun project-frame-sessions--save-frame-internal (frame manual)
-  "Save FRAME transactionally.  MANUAL bypasses retry backoff."
+(cl-defun project-frame-sessions--save-frame-internal
+    (frame manual &optional first-save-metadata)
+  "Save FRAME transactionally.  MANUAL bypasses retry backoff.
+FIRST-SAVE-METADATA, when non-nil, supplies authoritative project metadata."
   (unless (project-frame-sessions--graphical-frame-p frame)
     (user-error "Frame sessions require a graphical frame"))
   (let* ((existing-id (project-frame-sessions--frame-id frame))
@@ -862,7 +877,10 @@ Return the committed entry.  Caller holds the package lock."
     (when (and existing-id (not existing))
       (error "Frame refers to missing session %s" existing-id))
     (let* ((metadata (unless (or existing pending)
-                       (project-frame-sessions--first-save-metadata frame)))
+                       (if first-save-metadata
+                           (project-frame-sessions--first-save-metadata
+                            frame first-save-metadata)
+                         (project-frame-sessions--first-save-metadata frame))))
            (id (or existing-id (plist-get pending :id)
                    (project-frame-sessions--new-id)))
            (entry (or (and existing (copy-sequence existing))
@@ -1032,6 +1050,67 @@ Interactively FRAME is the selected frame.  A manual first save works without
             (_ (if (project-frame-sessions--find-live-frame
                     (plist-get entry :id)) " (open)" "")))))
 
+(defun project-frame-sessions--known-project-roots ()
+  "Return project.el's remembered roots, or nil when unavailable."
+  (condition-case nil
+      (when (and (require 'project nil t)
+                 (fboundp 'project-known-project-roots))
+        (project-known-project-roots))
+    (error nil)))
+
+(defun project-frame-sessions--project-name-at-root (root)
+  "Return project.el's project name for canonical ROOT, or nil."
+  (condition-case nil
+      (when (and (fboundp 'project-current) (fboundp 'project-name))
+        (when-let* ((project (project-current nil root))
+                    (name (project-name project)))
+          (and (project-frame-sessions--valid-name-p name)
+               (string-trim name))))
+    (error nil)))
+
+(defun project-frame-sessions--saved-roots (entries)
+  "Return canonical roots represented by active ENTRIES."
+  (delete-dups
+   (delq nil
+         (mapcar (lambda (entry)
+                   (ignore-errors
+                     (project-frame-sessions--canonical-root
+                      (plist-get entry :root))))
+                 entries))))
+
+(defun project-frame-sessions--unsaved-projects (entries)
+  "Return tagged remembered projects not represented by ENTRIES."
+  (let ((saved (project-frame-sessions--saved-roots entries)) seen projects)
+    (dolist (root (project-frame-sessions--known-project-roots))
+      (condition-case nil
+          (when (and (stringp root) (file-name-absolute-p root)
+                     (not (file-remote-p root)) (file-directory-p root))
+            (let ((canonical (project-frame-sessions--canonical-root root)))
+              (unless (or (member canonical saved) (member canonical seen))
+                (push canonical seen)
+                (push (list :type 'project :root canonical
+                            :name (project-frame-sessions--project-name-at-root
+                                   canonical))
+                      projects))))
+        (error nil)))
+    (nreverse projects)))
+
+(defun project-frame-sessions--unique-project-label (project occupied projects)
+  "Return a unique completion label for PROJECT.
+OCCUPIED contains saved-session labels and PROJECTS is the full project list."
+  (let* ((root (plist-get project :root))
+         (name (or (plist-get project :name)
+                   (file-name-nondirectory (directory-file-name root))))
+         (same-name (cl-count name projects :test #'equal
+                              :key (lambda (item)
+                                     (or (plist-get item :name)
+                                         (file-name-nondirectory
+                                          (directory-file-name
+                                           (plist-get item :root))))))))
+    (if (and (= same-name 1) (not (member name occupied)))
+        name
+      (format "%s — %s" name (abbreviate-file-name root)))))
+
 (defun project-frame-sessions--active-choices ()
   "Return active restore completion choices."
   (let (choices)
@@ -1043,6 +1122,33 @@ Interactively FRAME is the selected frame.  A manual first save works without
         (project-frame-sessions--warn "Session %s has a missing snapshot"
                                       (plist-get entry :name))))
     (nreverse choices)))
+
+(defun project-frame-sessions--restore-choices ()
+  "Return tagged saved-session and remembered-project restore choices."
+  (let* ((entries (project-frame-sessions--read-index))
+         (session-choices (project-frame-sessions--active-choices))
+         (projects (project-frame-sessions--unsaved-projects entries))
+         (occupied (mapcar #'car session-choices))
+         (choices
+          (mapcar (lambda (choice)
+                    (cons (car choice)
+                          (list :type 'session :entry (cdr choice))))
+                  session-choices)))
+    (dolist (project projects choices)
+      (let ((label (project-frame-sessions--unique-project-label
+                    project occupied projects)))
+        (push label occupied)
+        (setq choices (append choices (list (cons label project))))))))
+
+(defun project-frame-sessions--select-restore-candidate (prompt)
+  "Select a tagged restore candidate using PROMPT."
+  (project-frame-sessions--scan-recovery)
+  (let ((choices (project-frame-sessions--restore-choices)))
+    (unless choices (user-error "No saved frame sessions"))
+    (let* ((selection (completing-read prompt choices nil t))
+           (candidate (cdr (assoc-string selection choices))))
+      (unless candidate (user-error "No session selected"))
+      candidate)))
 
 (defun project-frame-sessions--select-active (prompt)
   "Select an active session using PROMPT."
@@ -1195,35 +1301,63 @@ recent Emacs versions, so capture it when Desktop offers to restore it."
           (signal (car restore-error) (cdr restore-error))))
       frame)))
 
+(defun project-frame-sessions--enroll-project (frame project)
+  "Open tagged PROJECT in FRAME and transactionally enroll the frame."
+  (let ((root (plist-get project :root)))
+    (set-frame-parameter frame 'project-frame-sessions-root root)
+    (with-selected-frame frame
+      (setq default-directory root)
+      (require 'dired)
+      (dired root)
+      ;; Save only after Dired has installed its buffer and window state.
+      (project-frame-sessions--save-frame-internal
+       frame t (list :root root :name (plist-get project :name))))
+    (select-frame-set-input-focus frame)
+    frame))
+
 (defun project-frame-sessions--route-restore (new-frame-p)
-  "Select and restore a session, creating a frame only when NEW-FRAME-P."
-  (let* ((entry (project-frame-sessions--select-active "Restore frame session: "))
-         (owner (project-frame-sessions--find-live-frame
-                 (plist-get entry :id))))
-    (if owner
-        (progn (select-frame-set-input-focus owner) owner)
-      (if new-frame-p
-          (let ((frame (make-frame)))
-            (condition-case err
-                (project-frame-sessions--restore-entry entry frame nil)
-              (error
-               (when (frame-live-p frame)
-                 (let ((project-frame-sessions--delete-suppressed frame))
-                   (delete-frame frame t)))
-               (signal (car err) (cdr err)))))
-        (project-frame-sessions--restore-entry entry (selected-frame) t)))))
+  "Select and route a restore candidate, honoring NEW-FRAME-P."
+  (let ((candidate
+         (project-frame-sessions--select-restore-candidate
+          "Restore frame session or project: ")))
+    (pcase (plist-get candidate :type)
+      ('project
+       ;; Project failures intentionally leave this frame available for retry.
+       (project-frame-sessions--enroll-project
+        (if new-frame-p (make-frame) (selected-frame)) candidate))
+      ('session
+       (let* ((entry (plist-get candidate :entry))
+              (owner (project-frame-sessions--find-live-frame
+                      (plist-get entry :id))))
+         (if owner
+             (progn (select-frame-set-input-focus owner) owner)
+           (if new-frame-p
+               (let ((frame (make-frame)))
+                 (condition-case err
+                     (project-frame-sessions--restore-entry entry frame nil)
+                   (error
+                    (when (frame-live-p frame)
+                      (let ((project-frame-sessions--delete-suppressed frame))
+                        (delete-frame frame t)))
+                    (signal (car err) (cdr err)))))
+             (project-frame-sessions--restore-entry entry (selected-frame) t)))))
+      (_ (error "Unknown restore candidate type: %S"
+                (plist-get candidate :type))))))
 
 ;;;###autoload
 (defun project-frame-sessions-restore ()
-  "Select a session, then restore it in a new graphical frame.
-If it is already live, focus that frame.  Canceling selection creates no frame."
+  "Select a session or remembered project and open it in a new frame.
+A live session is focused instead.  A project opens in Dired and is enrolled as
+a session.  Canceling selection creates no frame."
   (interactive)
   (project-frame-sessions--route-restore t))
 
 ;;;###autoload
 (defun project-frame-sessions-restore-current-frame ()
-  "Select a session and restore it into the selected frame.
-The old layout, tabs, identity, root, and directory are rolled back on failure."
+  "Select a session or remembered project for the selected frame.
+Session restoration rolls back on failure.  A project opens in Dired and is
+then enrolled; project open or save failures intentionally leave the frame at
+the project for manual recovery."
   (interactive)
   (project-frame-sessions--route-restore nil))
 
