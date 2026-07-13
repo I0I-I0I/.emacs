@@ -201,6 +201,29 @@
   (put 'narrow-to-region 'disabled nil)
   (put 'narrow-to-page 'disabled nil)
 
+  (defun my/shrink-region-by-sexp ()
+    "Move the active region's mark one sexp toward point.
+
+Signal a user error when the region is inactive or its mark cannot be
+moved across a complete sexp.  Never move the mark past point."
+    (interactive)
+    (unless (use-region-p)
+      (user-error "No active region"))
+    (let* ((point-position (point))
+           (old-mark (mark))
+           (direction (if (> old-mark point-position) -1 1))
+           (new-mark (condition-case nil
+                         (scan-sexps old-mark direction)
+                       (scan-error nil))))
+      (unless new-mark
+        (user-error "Cannot shrink region by another sexp"))
+      (set-mark (if (> old-mark point-position)
+                    (max point-position new-mark)
+                  (min point-position new-mark)))
+      (setq deactivate-mark nil)))
+
+  (keymap-global-set "C-M-S-SPC" #'my/shrink-region-by-sexp)
+
   (defvar my/jump-to-first-match-char-in-line--char nil
     "Character used by the most recent line-local jump.")
 
@@ -208,11 +231,13 @@
     "Jump to a character later on the current line.
 
 On the first invocation, read a character and jump to its first
-occurrence after point.  Repeating the command jumps to the next
-occurrence of the same character, similar to repeating `isearch-forward'."
+occurrence after point.  Repeating this command, or invoking its backward
+counterpart, reuses the same character."
     (interactive)
     (let* ((repeating
-            (eq last-command #'my/jump-to-first-match-char-in-line))
+            (memq last-command
+                  '(my/jump-to-first-match-char-in-line
+                    my/jump-to-first-match-char-backward-in-line)))
            (char
             (if repeating
                 my/jump-to-first-match-char-in-line--char
@@ -221,12 +246,39 @@ occurrence of the same character, similar to repeating `isearch-forward'."
            (start (point)))
       (setq my/jump-to-first-match-char-in-line--char char)
 
-      (forward-char 1)
-
-      (if (search-forward (char-to-string char) line-end t)
+      (if (and (< (point) line-end)
+               (progn
+                 (forward-char 1)
+                 (search-forward (char-to-string char) line-end t)))
           (backward-char 1)
         (goto-char start)
         (user-error "No further `%c' on this line" char))))
+
+  (defun my/jump-to-first-match-char-backward-in-line ()
+    "Jump to an earlier occurrence of the current line-local jump character.
+
+When invoked after either line-local jump command, reuse its character;
+otherwise, read a new character.  Repeating moves to earlier matches."
+    (interactive)
+    (let* ((repeating
+            (memq last-command
+                  '(my/jump-to-first-match-char-in-line
+                    my/jump-to-first-match-char-backward-in-line)))
+           (char
+            (if repeating
+                my/jump-to-first-match-char-in-line--char
+              (read-char "Jump backward to character: ")))
+           (line-beginning (line-beginning-position))
+           (start (point)))
+      (setq my/jump-to-first-match-char-in-line--char char)
+
+      (if (and (> (point) line-beginning)
+               (progn
+                 (backward-char 1)
+                 (search-backward (char-to-string char) line-beginning t)))
+          (point)
+        (goto-char start)
+        (user-error "No earlier `%c' on this line" char))))
 
   (defun my/isearch-forward-dwim ()
     "Search forward, using the active region when available."
@@ -307,6 +359,37 @@ occurrence of the same character, similar to repeating `isearch-forward'."
   (defun move-text-up   (arg) (interactive "*p") (move-text-internal (- arg)))
 
   ;; Frame/workflow helpers.
+  (defcustom my/frame-transparent-opacity 85
+    "Background opacity used for transparent frames.
+
+The value must be an integer between 0 and 100."
+    :type 'integer
+    :group 'frames)
+
+  (defun my/set-frame-opacity (opacity)
+    "Set OPACITY for all current and future frames."
+    (unless (and (integerp opacity) (<= 0 opacity 100))
+      (user-error "Opacity must be an integer between 0 and 100"))
+    (modify-all-frames-parameters
+     `((alpha-background . ,opacity))))
+
+  (defun my/toggle-transparency (&optional opacity)
+    "Toggle all current and future frames between transparent and opaque.
+
+With a prefix argument, prompt for OPACITY instead of toggling."
+    (interactive
+     (list
+      (when current-prefix-arg
+        (read-number "Frame opacity (0–100): "
+                     my/frame-transparent-opacity))))
+    (let* ((current (alist-get 'alpha-background default-frame-alist))
+           (target
+            (or opacity
+                (if (and (numberp current) (< current 100))
+                    100
+                  my/frame-transparent-opacity))))
+      (my/set-frame-opacity target)))
+
   (defun my/project-or-cwd-name (&optional directory)
     "Return the `project.el' name for DIRECTORY, falling back to its cwd name."
     (let* ((directory (file-name-as-directory
@@ -600,6 +683,7 @@ kill buffers that are local to the current frame before deleting it."
    ("C-c L" . my/copy-current-line-number)
    ("C-c p" . my/copy-current-path)
    ("C-x f" . toggle-frame-fullscreen)
+   ("C-c t" . my/toggle-transparency)
    ("C-x 5 n" . my/new-workflow-frame)
    ("C-x 5 p" . my/new-project-frame)
    ("C-x 5 d" . my/change-frame-default-directory)
@@ -618,6 +702,7 @@ kill buffers that are local to the current frame before deleting it."
 
    ("C-s" . my/isearch-forward-dwim)
    ("C-'" . my/jump-to-first-match-char-in-line)
+   ("C-\"" . my/jump-to-first-match-char-backward-in-line)
 
    (:map minibuffer-local-map
          ("M-i" . my/minibuffer-insert-region-or-symbol))
@@ -1105,6 +1190,8 @@ is non-nil, return only when it returns non-nil."
 		       ("C-j" . icomplete-fido-exit)
 		       ("M-i" . my/minibuffer-insert-region-or-symbol)))
   :custom
+  (resize-mini-windows t)
+  (max-mini-window-height 0.4)
   (completion-styles '(basic flex))
   (completions-format 'one-column)
   (completions-max-height 30)
@@ -1734,7 +1821,7 @@ With prefix argument NEW, always create a new eshell buffer."
   :custom
   (harpoon-project-package 'project)
   :bind (:map my/override-map
-		      ("M-e" . harpoon-quick-menu-hydra)
+		      ("C-c h" . harpoon-quick-menu-hydra)
 		      ("M-0" . harpoon-add-file)
 		      ("C-c 1" . harpoon-go-to-1)
 		      ("C-c 2" . harpoon-go-to-2)
@@ -1833,32 +1920,7 @@ opened without hiding or toggling the pi buffer."
   (:map pi-coding-agent-input-mode-map
         ("C-c a" . my/pi-coding-agent-return-tab)))
 
-;; (use-package codeium
-;;   :vc (:url "https://github.com/Exafunction/codeium.el"
-;;             :rev :newest)
-;;   :init
-;;   (add-to-list 'completion-at-point-functions #'codeium-completion-at-point))
-
-;; (use-package agent-shell
-;;   :ensure t
-;;   :config
-;;   ;; (setq agent-shell-openai-authentication
-;;   ;;       (agent-shell-openai-make-authentication :login t))
-;;   (setq agent-shell-google-authentication
-;;         (agent-shell-google-make-authentication :login t))
-;;   :bind (("C-c a" . agent-shell)
-;;          :map agent-shell-mode-map
-;;          ("RET" . newline)
-;;          ("C-c C-c" . shell-maker-submit)
-;;          ("C-c C-k" . agent-shell-interrupt)))
-
 ;;; Zen mode
-;; (use-package sublimity
-;;   :ensure t
-;;   :config
-;;   (require 'sublimity-attractive)
-;;   (sublimity-mode)
-;;   :bind (("C-c z" . sublimity-mode)))
 
 (use-package olivetti
   :ensure t
@@ -1966,7 +2028,9 @@ opened without hiding or toggling the pi buffer."
    '((display-buffer-in-side-window)
      (side . right)
      (window-width . 0.5)
-     (preserve-size . (t . t))))
+     ;; Preserve only the width; the preview must be allowed to shrink
+     ;; vertically when Fido grows the minibuffer.
+     (preserve-size . (t . nil))))
   :bind (:map dired-mode-map
 		      ("C-c C-p" . dired-preview-mode)))
 
@@ -2319,9 +2383,9 @@ point on the parent heading; Org then inserts the entry as a child."
     (my/org-mermaid-preview-clear)
     (org-with-wide-buffer
      (org-element-map (org-element-parse-buffer) 'src-block
-	   (lambda (element)
-         (when (string= (org-element-property :language element) "mermaid")
-           (my/org-mermaid-preview--render-block element))))))
+	                  (lambda (element)
+                        (when (string= (org-element-property :language element) "mermaid")
+                          (my/org-mermaid-preview--render-block element))))))
 
   (defvar-local my/org-mermaid-preview-timer nil
     "Idle timer used to debounce automatic Mermaid preview rendering.")

@@ -187,6 +187,11 @@ Useful variants:
 ./scripts/install-open-with-emacs-linux.sh --daemon-only
 #+end_src
 
+The installer imports the current graphical-session environment and restarts
+the daemon. Save any work in temporary client frames before rerunning it.
+This is required for desktop launchers such as =xdg-open= to work from a
+systemd-started Emacs daemon.
+
 Test:
 
 #+begin_src bash
