@@ -8,3 +8,5 @@
 !/scripts/
 !/scripts/*
 !/packages/project-frame-sessions/
+/packages/project-frame-sessions/*.elc
+/packages/project-frame-sessions/PLAN.md

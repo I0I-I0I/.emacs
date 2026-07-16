@@ -12,10 +12,18 @@
 ;; used to suggest a root and name.  Restore completion also appends remembered
 ;; local projects that do not yet have a saved session; selecting one opens its
 ;; root in Dired and enrolls that frame transactionally.  Desktop saves buffers,
-;; and Frameset
-;; saves the complete tab-bar workspace.  Tabspaces' frame-local buffer lists
-;; are represented by the built-in tab parameters and are therefore preserved
-;; without copying Tabspaces globals.
+;; and Frameset saves the complete tab-bar workspace.  Tabspaces' frame-local
+;; buffer lists are represented by the built-in tab parameters and are therefore
+;; preserved without copying Tabspaces globals.  Frame buffers are preserved on
+;; close by default; optional cleanup only happens after a successful save and
+;; deletion and never kills buffers shared with another frame.
+;;
+;; While the global mode is enabled, package snapshots can also restart Eshell
+;; buffers in their saved local or Tramp directories and resume the exact JSONL
+;; session used by pi-coding-agent chat/input buffers.  Pi and Eat are optional.
+;; Eshell restoration starts a fresh process and runs normal hooks, including a
+;; user's Eat hook; process state and terminal transcript are not restored.  Utility
+;; tabs and buffers must not be excluded by user tab/Desktop predicates.
 ;;
 ;; `project-frame-sessions-directory' must be local and trusted: Desktop files
 ;; are executable Lisp when restored.  Metadata is parsed with `read-eval' nil.
@@ -34,13 +42,23 @@
 (defvar tab-bar-tab-post-open-functions)
 (defvar tab-bar-tab-post-select-functions)
 (defvar write-region-inhibit-fsync)
+(defvar eshell-buffer-name)
+(defvar eshell-mode-hook)
+(defvar pi-coding-agent--chat-buffer)
+(defvar pi-coding-agent--input-buffer)
+(defvar pi-coding-agent--state)
+(defvar pi-coding-agent--canonical-session-directory)
 
 (declare-function project-root "project" (project))
 (declare-function project-known-project-roots "project" ())
 (declare-function project-name "project" (project))
 (declare-function project-current "project" (&optional maybe-prompt directory))
 (declare-function dired "dired" (dirname &optional switches))
+(declare-function kill-buffer--possibly-save "simple" (buffer))
 (declare-function tabspaces--buffer-list "tabspaces" (&optional frame tabnum))
+(declare-function pi-coding-agent-open-session-file "pi-coding-agent" (session-file))
+(declare-function pi-coding-agent--setup-session "pi-coding-agent" (dir &optional session))
+(declare-function eshell "esh-mode" (&optional arg))
 
 (defgroup project-frame-sessions nil
   "Persistent named frame sessions."
@@ -64,9 +82,41 @@ that library is available."
 Buffers associated with non-current tabs are added automatically."
   :type 'function)
 
+(defcustom project-frame-sessions-ignored-buffer-name-regexp nil
+  "Regexp matching buffer names that should not be persisted.
+Nil means that no buffer is ignored by this package.  Desktop's own buffer
+exclusion options continue to apply independently."
+  :type '(choice (const :tag "None" nil) regexp))
+
+(defcustom project-frame-sessions-kill-buffers-on-switch nil
+  "When non-nil, kill outgoing buffers after a current-frame switch.
+Only buffers belonging to the outgoing workspace and not associated with
+another live frame are killed.  Modified buffers require confirmation.  When
+nil, outgoing buffers remain live but are excluded from the destination
+session until explicitly displayed or associated with that frame again.
+This option does not control cleanup when a frame is closed; see
+`project-frame-sessions-preserve-buffers-after-frame-close'."
+  :type 'boolean)
+
+(defcustom project-frame-sessions-preserve-buffers-after-frame-close t
+  "When non-nil, preserve session buffers after an enrolled frame closes.
+When nil, buffers belonging only to the closed frame are killed after its
+session was saved and deletion was confirmed.  Buffers used by another live
+frame are always preserved.  This option does not affect current-frame session
+switches, which are controlled by
+`project-frame-sessions-kill-buffers-on-switch'."
+  :type 'boolean)
+
+(defcustom project-frame-sessions-ignored-tab-name-regexp nil
+  "Regexp matching names of tabs that should not be persisted.
+Nil means that no tab is ignored by name."
+  :type '(choice (const :tag "None" nil) regexp))
+
 (defcustom project-frame-sessions-tab-omit-function nil
-  "Optional predicate for tabs that should not be persisted.
-The function receives one tab alist."
+  "Optional additional predicate for tabs that should not be persisted.
+The function receives one tab alist.  A tab is omitted when either this
+predicate returns non-nil or its name matches
+`project-frame-sessions-ignored-tab-name-regexp'."
   :type '(choice (const nil) function))
 
 (defcustom project-frame-sessions-post-restore-function nil
@@ -112,6 +162,8 @@ between its atomic directory creation and owner metadata publication."
 (defconst project-frame-sessions--desktop-name "desktop.el")
 (defconst project-frame-sessions--id-parameter 'project-frame-sessions-id)
 (defconst project-frame-sessions--deleted-parameter 'project-frame-sessions-deleted)
+(defconst project-frame-sessions--excluded-buffers-parameter
+  'project-frame-sessions-excluded-buffers)
 (defconst project-frame-sessions--generic-frame-names
   '("" "Emacs" "GNU Emacs" "emacs" "*scratch*"))
 (defconst project-frame-sessions--desktop-state-variables
@@ -137,8 +189,26 @@ between its atomic directory creation and owner metadata publication."
 (defvar project-frame-sessions--shutdown nil)
 (defvar project-frame-sessions--preflight-complete nil)
 (defvar project-frame-sessions--delete-suppressed nil)
+(defvar project-frame-sessions--pending-frame-closes (make-hash-table :test #'eq)
+  "Frames whose delete hook has already saved and scheduled finalization.")
 (defvar project-frame-sessions--recovery-warning-shown nil)
 (defvar project-frame-sessions--inhibit-dirty nil)
+(defvar project-frame-sessions--save-buffer-exclusions nil
+  "Buffers dynamically excluded from the save currently in progress.")
+(defvar project-frame-sessions--desktop-restored-buffers nil
+  "Buffers restored by the dynamically active Desktop read.")
+(defvar project-frame-sessions--utility-restore-cache nil
+  "Dynamically bound utility-session cache for one Desktop read.")
+(defvar project-frame-sessions--desktop-handler-registrations nil
+  "Desktop handler alist cells installed by this package.")
+(defvar-local project-frame-sessions--utility-identity nil
+  "Stable identity serialized for this utility buffer.")
+(defvar-local project-frame-sessions--prior-desktop-save-buffer nil
+  "Value of `desktop-save-buffer' before package enrollment.")
+(defvar-local project-frame-sessions--prior-desktop-save-buffer-local-p nil
+  "Whether `desktop-save-buffer' was local before package enrollment.")
+(defvar-local project-frame-sessions--desktop-save-buffer-owned nil
+  "Non-nil when this package installed `desktop-save-buffer' here.")
 (defvar project-frame-sessions--failpoint-function nil
   "Dynamically bound test callback called with transaction boundary symbols.")
 
@@ -156,7 +226,7 @@ between its atomic directory creation and owner metadata publication."
   (unless (or (null project-frame-sessions-autosave-interval)
               (and (numberp project-frame-sessions-autosave-interval)
                    (> project-frame-sessions-autosave-interval 0)))
-    (error "project-frame-sessions-autosave-interval must be nil or positive, not %S"
+    (error "Project-frame-sessions-autosave-interval must be nil or positive, not %S"
            project-frame-sessions-autosave-interval))
   (dolist (pair `((project-frame-sessions-debounce-delay
                    . ,project-frame-sessions-debounce-delay)
@@ -165,12 +235,13 @@ between its atomic directory creation and owner metadata publication."
                   (project-frame-sessions-ownerless-lock-stale-seconds
                    . ,project-frame-sessions-ownerless-lock-stale-seconds)))
     (unless (project-frame-sessions--nonnegative-number-p (cdr pair))
-      (error "%s must be a nonnegative number, not %S" (car pair) (cdr pair))))
+      (error "Value of %s must be a nonnegative number, not %S"
+             (car pair) (cdr pair))))
   (unless (or (null project-frame-sessions-retry-delays)
               (and (consp project-frame-sessions-retry-delays)
                    (cl-every #'project-frame-sessions--nonnegative-number-p
                              project-frame-sessions-retry-delays)))
-    (error "project-frame-sessions-retry-delays must be nil or a nonempty list of nonnegative numbers, not %S"
+    (error "Project-frame-sessions-retry-delays must be nil or a nonempty list of nonnegative numbers, not %S"
            project-frame-sessions-retry-delays))
   t)
 
@@ -232,14 +303,19 @@ popups, cannot own persistent frame sessions."
   (and (stringp name) (not (string-empty-p (string-trim name)))))
 
 (defun project-frame-sessions--index-file ()
+  "Return the package index file."
   (expand-file-name "index.eld" project-frame-sessions-directory))
 (defun project-frame-sessions--sessions-directory ()
+  "Return the active session storage directory."
   (expand-file-name "sessions/" project-frame-sessions-directory))
 (defun project-frame-sessions--trash-directory ()
+  "Return the recoverable trash directory."
   (expand-file-name "trash/" project-frame-sessions-directory))
 (defun project-frame-sessions--recovery-directory ()
+  "Return the interrupted-transaction recovery directory."
   (expand-file-name "recovery/" project-frame-sessions-directory))
 (defun project-frame-sessions--lock-directory ()
+  "Return the transaction lock directory."
   (expand-file-name ".transaction-lock/" project-frame-sessions-directory))
 
 (defun project-frame-sessions--assert-local-path (path)
@@ -541,15 +617,26 @@ A corrupt index is never treated as an empty index."
          (values (mapcar #'symbol-value variables)))
     (cl-progv variables values (funcall function))))
 
+(defun project-frame-sessions--ignored-tab-p (tab)
+  "Return non-nil when TAB is configured to be omitted from saves."
+  (or (and project-frame-sessions-ignored-tab-name-regexp
+           (when-let* ((name (alist-get 'name tab)))
+             (string-match-p project-frame-sessions-ignored-tab-name-regexp
+                             name)))
+      (and project-frame-sessions-tab-omit-function
+           (funcall project-frame-sessions-tab-omit-function tab))))
+
 (defun project-frame-sessions--filter-tabs (current filtered parameters saving)
   "Sanitize CURRENT tabs and optionally omit tabs while SAVING.
 FILTERED and PARAMETERS are passed through to `frameset-filter-tabs'."
   (let ((parameter (frameset-filter-tabs current filtered parameters saving)))
-    (if (not (and saving project-frame-sessions-tab-omit-function))
+    (if (not (and saving
+                  (or project-frame-sessions-ignored-tab-name-regexp
+                      project-frame-sessions-tab-omit-function)))
         parameter
       ;; Frameset filters receive the complete (tabs . VALUE) parameter, not
-      ;; VALUE alone.  Never pass its `tabs' key to the user predicate.
-      (let* ((kept (cl-remove-if project-frame-sessions-tab-omit-function
+      ;; VALUE alone.  Never pass its `tabs' key to an omission predicate.
+      (let* ((kept (cl-remove-if #'project-frame-sessions--ignored-tab-p
                                  (cdr parameter)))
              (current-tab (cl-find-if
                            (lambda (tab)
@@ -559,12 +646,9 @@ FILTERED and PARAMETERS are passed through to `frameset-filter-tabs'."
           (setcar kept (cons 'current-tab (cdar kept))))
         (cons (car parameter) kept)))))
 
-(defun project-frame-sessions--tab-buffers (frame)
-  "Return all live buffers associated with every tab of FRAME.
-This includes the `wc-bl', `wc-bbl', and Tabspaces workspace association stored
-in the built-in `ws' tab parameter."
-  (let ((buffers (copy-sequence
-                  (funcall project-frame-sessions-frame-buffer-function frame))))
+(defun project-frame-sessions--tab-parameter-buffers (frame)
+  "Return live buffers stored in FRAME's tab parameters."
+  (let (buffers)
     (dolist (tab (frame-parameter frame 'tabs))
       (dolist (buffer (append (cdr (assq 'wc-bl tab))
                               (cdr (assq 'wc-bbl tab))))
@@ -574,15 +658,371 @@ in the built-in `ws' tab parameter."
         (dolist (item (car (cdr association)))
           (let ((buffer (if (bufferp item) item (get-buffer item))))
             (when (buffer-live-p buffer) (cl-pushnew buffer buffers))))))
-    (cl-delete-if-not #'buffer-live-p buffers)))
+    buffers))
+
+(defun project-frame-sessions--active-workspace-buffers (frame)
+  "Return buffers actively displayed or tab-associated with FRAME."
+  (let ((buffers (project-frame-sessions--tab-parameter-buffers frame)))
+    (dolist (window (window-list frame 'no-minibuffer))
+      (when-let* ((buffer (window-buffer window)))
+        (when (buffer-live-p buffer) (cl-pushnew buffer buffers))))
+    buffers))
+
+(defun project-frame-sessions--excluded-buffers (frame)
+  "Return FRAME's live buffers excluded from session saves."
+  (cl-delete-if-not
+   #'buffer-live-p
+   (copy-sequence
+    (or (frame-parameter frame
+                         project-frame-sessions--excluded-buffers-parameter)
+        nil))))
+
+(defun project-frame-sessions--set-excluded-buffers (frame buffers)
+  "Set FRAME's save exclusions to live BUFFERS."
+  (set-frame-parameter
+   frame project-frame-sessions--excluded-buffers-parameter
+   (cl-delete-if-not #'buffer-live-p
+                     (cl-remove-duplicates buffers :test #'eq))))
+
+(defun project-frame-sessions--tab-buffers (frame)
+  "Return live buffers belonging to FRAME's session workspace.
+Buffers explicitly displayed or associated after a switch are removed from the
+frame's exclusion list.  Hidden tab and Tabspaces associations are included."
+  (let* ((active (project-frame-sessions--active-workspace-buffers frame))
+         (excluded (cl-set-difference
+                    (project-frame-sessions--excluded-buffers frame)
+                    active :test #'eq))
+         (buffers (copy-sequence
+                   (funcall project-frame-sessions-frame-buffer-function frame))))
+    (project-frame-sessions--set-excluded-buffers frame excluded)
+    (dolist (buffer (project-frame-sessions--tab-parameter-buffers frame))
+      (cl-pushnew buffer buffers))
+    (cl-set-difference
+     (cl-delete-if-not #'buffer-live-p buffers)
+     (append excluded project-frame-sessions--save-buffer-exclusions)
+     :test #'eq)))
+
+(defun project-frame-sessions--other-frame-buffers (frame)
+  "Return live session buffers associated with frames other than FRAME."
+  (let (buffers)
+    (dolist (candidate (frame-list))
+      (when (and (frame-live-p candidate) (not (eq candidate frame)))
+        (dolist (buffer (project-frame-sessions--tab-buffers candidate))
+          (cl-pushnew buffer buffers))))
+    buffers))
+
+(defun project-frame-sessions--frame-close-candidates (frame)
+  "Return FRAME session buffers not currently used by another live frame."
+  (cl-set-difference (project-frame-sessions--tab-buffers frame)
+                     (project-frame-sessions--other-frame-buffers frame)
+                     :test #'eq))
+
+(defun project-frame-sessions--kill-outgoing-buffer (buffer)
+  "Kill BUFFER, asking for confirmation first when it is modified."
+  (when (and
+         (buffer-live-p buffer)
+         (or (not (buffer-modified-p buffer))
+             (with-current-buffer buffer
+               (if (fboundp 'kill-buffer--possibly-save)
+                   (kill-buffer--possibly-save buffer)
+                 (yes-or-no-p
+                  (format "Buffer %s modified; kill anyway? "
+                          (buffer-name buffer)))))))
+    (kill-buffer buffer)))
+
+(defun project-frame-sessions--dispose-closed-frame-buffers (buffers)
+  "Kill safe BUFFERS after a frame close, rechecking live-frame sharing.
+Failure or refusal to kill one buffer does not prevent processing the rest."
+  (unless project-frame-sessions-preserve-buffers-after-frame-close
+    (dolist (buffer buffers)
+      (when (and (buffer-live-p buffer)
+                 (not (memq buffer
+                            (project-frame-sessions--other-frame-buffers nil))))
+        (condition-case err
+            (project-frame-sessions--kill-outgoing-buffer buffer)
+          (quit
+           (project-frame-sessions--warn
+            "Did not kill frame buffer %s" (buffer-name buffer)))
+          (error
+           (project-frame-sessions--warn
+            "Could not kill frame buffer %s: %s"
+            (buffer-name buffer) (error-message-string err))))))))
+
+(defun project-frame-sessions--finalize-frame-close (frame buffers)
+  "Finish FRAME's pending close and dispose BUFFERS if it was deleted."
+  (remhash frame project-frame-sessions--pending-frame-closes)
+  (unless (frame-live-p frame)
+    (project-frame-sessions--dispose-closed-frame-buffers buffers)))
+
+(defun project-frame-sessions--complete-current-frame-switch
+    (frame outgoing prior-excluded destination)
+  "Finish FRAME's switch from OUTGOING buffers to DESTINATION buffers.
+PRIOR-EXCLUDED is retained.  Destination buffers and buffers belonging to
+other frames are never killed.  Buffers that remain live stay excluded from
+future saves."
+  (let* ((destination (cl-delete-if-not #'buffer-live-p destination))
+         (excluded (cl-set-difference
+                    (cl-remove-duplicates
+                     (append prior-excluded outgoing) :test #'eq)
+                    destination :test #'eq))
+         (candidates (cl-set-difference outgoing destination :test #'eq)))
+    ;; Install exclusions before asking questions, so quitting a confirmation
+    ;; cannot accidentally enroll an outgoing buffer in the destination.
+    (project-frame-sessions--set-excluded-buffers frame excluded)
+    (when project-frame-sessions-kill-buffers-on-switch
+      (let ((shared (project-frame-sessions--other-frame-buffers frame))
+            aborted)
+        (dolist (buffer candidates)
+          (unless (or aborted (memq buffer shared))
+            (condition-case err
+                (project-frame-sessions--kill-outgoing-buffer buffer)
+              (quit (setq aborted t))
+              (error
+               (project-frame-sessions--warn
+                "Could not kill outgoing buffer %s: %s"
+                (buffer-name buffer) (error-message-string err))))))))
+    (project-frame-sessions--set-excluded-buffers frame excluded)))
 
 (defun project-frame-sessions--buffer-save-predicate (buffers prior)
-  "Return a Desktop predicate restricted to BUFFERS and honoring PRIOR."
+  "Return a Desktop predicate restricted to BUFFERS and honoring PRIOR.
+Buffers matching `project-frame-sessions-ignored-buffer-name-regexp' are also
+rejected."
   (lambda (filename buffer-name mode &rest args)
     (let ((buffer (get-buffer buffer-name)))
       (and (buffer-live-p buffer) (memq buffer buffers)
+           (not (and project-frame-sessions-ignored-buffer-name-regexp
+                     (string-match-p
+                      project-frame-sessions-ignored-buffer-name-regexp
+                      buffer-name)))
            (or (null prior)
                (apply prior filename buffer-name mode args))))))
+
+(defun project-frame-sessions--utility-chat-buffer ()
+  "Return the Pi chat buffer associated with the current utility buffer."
+  (pcase major-mode
+    ('pi-coding-agent-chat-mode (current-buffer))
+    ('pi-coding-agent-input-mode
+     (and (boundp 'pi-coding-agent--chat-buffer)
+          (buffer-live-p pi-coding-agent--chat-buffer)
+          pi-coding-agent--chat-buffer))))
+
+(defun project-frame-sessions--pi-save-data (_desktop-directory)
+  "Return Desktop metadata for the current Pi buffer, or nil."
+  (let* ((role (pcase major-mode
+                 ('pi-coding-agent-chat-mode 'chat)
+                 ('pi-coding-agent-input-mode 'input)))
+         (chat (project-frame-sessions--utility-chat-buffer))
+         (state (and chat (buffer-local-value 'pi-coding-agent--state chat)))
+         (session-file (and (listp state) (plist-get state :session-file)))
+         (directory (and chat
+                         (or (and (boundp 'pi-coding-agent--canonical-session-directory)
+                                  (buffer-local-value
+                                   'pi-coding-agent--canonical-session-directory
+                                   chat))
+                             (buffer-local-value 'default-directory chat)))))
+    (if (and role chat (stringp session-file)
+             (not (string-empty-p session-file)))
+        (list :project-frame-sessions 1 :kind 'pi :role role
+              :session-file session-file :directory directory
+              :identity session-file)
+      (project-frame-sessions--warn
+       "Pi buffer %s has no session file and cannot be restored"
+       (buffer-name))
+      nil)))
+
+(defun project-frame-sessions--eshell-save-data (_desktop-directory)
+  "Return Desktop metadata for the current Eshell buffer."
+  (unless project-frame-sessions--utility-identity
+    (setq project-frame-sessions--utility-identity
+          (project-frame-sessions--new-id)))
+  (let ((directory (and (stringp default-directory)
+                        (file-name-absolute-p default-directory)
+                        (file-name-as-directory
+                         (expand-file-name default-directory)))))
+    (if directory
+        (list :project-frame-sessions 1 :kind 'eshell
+              :directory directory :buffer-name (buffer-name)
+              :identity project-frame-sessions--utility-identity)
+      (project-frame-sessions--warn
+       "Eshell buffer %s has no absolute directory and cannot be restored"
+       (buffer-name))
+      nil)))
+
+(defun project-frame-sessions--utility-save-data (desktop-directory)
+  "Return utility metadata for Desktop in DESKTOP-DIRECTORY."
+  (pcase major-mode
+    ((or 'pi-coding-agent-chat-mode 'pi-coding-agent-input-mode)
+     (project-frame-sessions--pi-save-data desktop-directory))
+    ('eshell-mode
+     (project-frame-sessions--eshell-save-data desktop-directory))))
+
+(defun project-frame-sessions--valid-utility-data-p (data kind)
+  "Return non-nil when DATA has this package's current KIND schema."
+  (and (listp data)
+       (equal (plist-get data :project-frame-sessions) 1)
+       (eq (plist-get data :kind) kind)))
+
+(defun project-frame-sessions--open-isolated-pi-session (session-file)
+  "Open SESSION-FILE in a Pi buffer unique to that exact file.
+Pi's public file-opening command currently selects its backing buffers by
+working directory.  Temporarily supply a stable named-session identity so two
+session files with the same working directory cannot alias or retarget each
+other.  Signal an error when the installed Pi version lacks this isolation
+point rather than risking mutation of another live session."
+  (unless (fboundp 'pi-coding-agent--setup-session)
+    (error "Installed Pi version cannot isolate restored sessions"))
+  (let ((setup (symbol-function 'pi-coding-agent--setup-session))
+        (identity (format "project-frame-sessions-%s"
+                          (substring (secure-hash 'sha256 session-file) 0 16))))
+    (cl-letf (((symbol-function 'pi-coding-agent--setup-session)
+               (lambda (directory &optional _session)
+                 (funcall setup directory identity))))
+      (pi-coding-agent-open-session-file session-file))))
+
+(defun project-frame-sessions--restore-pi-buffer (_file _name data)
+  "Restore a Pi buffer from Desktop auxiliary DATA."
+  (condition-case err
+      (let ((role (plist-get data :role))
+            (session-file (plist-get data :session-file)))
+        (unless (and (project-frame-sessions--valid-utility-data-p data 'pi)
+                     (memq role '(chat input))
+                     (stringp session-file)
+                     (file-name-absolute-p session-file)
+                     (not (file-remote-p session-file))
+                     (file-regular-p session-file)
+                     (file-readable-p session-file))
+          (error "Invalid or unavailable Pi session file"))
+        (unless (require 'pi-coding-agent nil t)
+          (error "Pi-coding-agent is unavailable"))
+        (let* ((cache (or project-frame-sessions--utility-restore-cache
+                          (setq project-frame-sessions--utility-restore-cache
+                                (make-hash-table :test #'equal))))
+               (chat (gethash session-file cache)))
+          (unless (buffer-live-p chat)
+            (setq chat
+                  (project-frame-sessions--open-isolated-pi-session session-file))
+            (unless (buffer-live-p chat)
+              (error "Pi did not return a live chat buffer"))
+            (puthash session-file chat cache))
+          (if (eq role 'chat)
+              chat
+            (let ((input (buffer-local-value 'pi-coding-agent--input-buffer chat)))
+              (unless (buffer-live-p input)
+                (error "Pi did not create an input buffer"))
+              input))))
+    (error
+     (project-frame-sessions--warn
+      "Could not restore Pi buffer: %s" (error-message-string err))
+     nil)))
+
+(defun project-frame-sessions--safe-buffer-name-p (name)
+  "Return non-nil when NAME is suitable for a restored utility buffer."
+  (and (stringp name) (not (string-empty-p name))
+       (not (string-prefix-p " " name))))
+
+(defun project-frame-sessions--restore-eshell-buffer (_file name data)
+  "Restore a fresh Eshell buffer from Desktop auxiliary DATA and NAME."
+  (condition-case err
+      (let ((directory (plist-get data :directory))
+            (saved-name (plist-get data :buffer-name)))
+        (unless (and (project-frame-sessions--valid-utility-data-p data 'eshell)
+                     (stringp (plist-get data :identity))
+                     (stringp directory) (file-name-absolute-p directory)
+                     ;; Do not contact a Tramp host merely to read a session.
+                     ;; Eshell will establish the connection when it needs it.
+                     (or (file-remote-p directory)
+                         (file-directory-p directory)))
+          (error "Invalid or unavailable Eshell directory"))
+        (unless (require 'eshell nil t) (error "Eshell is unavailable"))
+        (let* ((default-directory (file-name-as-directory
+                                   (expand-file-name directory)))
+               (eshell-buffer-name
+                (if (project-frame-sessions--safe-buffer-name-p saved-name)
+                    saved-name
+                  (if (project-frame-sessions--safe-buffer-name-p name)
+                      name
+                    "*eshell*")))
+               (buffer (eshell t)))
+          (unless (buffer-live-p buffer)
+            (error "Eshell did not return a live buffer"))
+          buffer))
+    (error
+     (project-frame-sessions--warn
+      "Could not restore Eshell buffer: %s" (error-message-string err))
+     nil)))
+
+(defun project-frame-sessions--desktop-handler-owned-p (mode)
+  "Return non-nil when this package owns the Desktop handler for MODE."
+  (memq (assq mode desktop-buffer-mode-handlers)
+        project-frame-sessions--desktop-handler-registrations))
+
+(defun project-frame-sessions--enroll-utility-buffer ()
+  "Enroll the current supported utility buffer in package Desktop saves."
+  (when (and project-frame-sessions-mode
+             (memq major-mode '(eshell-mode pi-coding-agent-chat-mode
+                                pi-coding-agent-input-mode))
+             (project-frame-sessions--desktop-handler-owned-p major-mode)
+             (not project-frame-sessions--desktop-save-buffer-owned))
+    (setq project-frame-sessions--prior-desktop-save-buffer-local-p
+          (local-variable-p 'desktop-save-buffer)
+          project-frame-sessions--prior-desktop-save-buffer desktop-save-buffer
+          project-frame-sessions--desktop-save-buffer-owned t
+          desktop-save-buffer #'project-frame-sessions--utility-save-data)))
+
+(defun project-frame-sessions--unenroll-utility-buffer ()
+  "Remove this package's Desktop enrollment from the current buffer."
+  (when project-frame-sessions--desktop-save-buffer-owned
+    (if project-frame-sessions--prior-desktop-save-buffer-local-p
+        (setq desktop-save-buffer
+              project-frame-sessions--prior-desktop-save-buffer)
+      (kill-local-variable 'desktop-save-buffer))
+    (setq project-frame-sessions--desktop-save-buffer-owned nil
+          project-frame-sessions--prior-desktop-save-buffer nil
+          project-frame-sessions--prior-desktop-save-buffer-local-p nil)))
+
+(defun project-frame-sessions--register-desktop-handler (mode function)
+  "Register FUNCTION for Desktop MODE unless another handler already exists."
+  (let ((existing (assq mode desktop-buffer-mode-handlers)))
+    (cond
+     ((null existing)
+      (let ((registration (cons mode function)))
+        (push registration desktop-buffer-mode-handlers)
+        (push registration project-frame-sessions--desktop-handler-registrations)))
+     ((eq (cdr existing) function)
+      ;; Do not claim an indistinguishable pre-existing registration.
+      nil)
+     (t
+      (project-frame-sessions--warn
+       "Desktop handler for %s already exists; utility restore integration skipped"
+       mode)))))
+
+(defun project-frame-sessions--register-desktop-integrations ()
+  "Install optional utility Desktop integrations idempotently."
+  (project-frame-sessions--register-desktop-handler
+   'eshell-mode #'project-frame-sessions--restore-eshell-buffer)
+  (project-frame-sessions--register-desktop-handler
+   'pi-coding-agent-chat-mode #'project-frame-sessions--restore-pi-buffer)
+  (project-frame-sessions--register-desktop-handler
+   'pi-coding-agent-input-mode #'project-frame-sessions--restore-pi-buffer)
+  (dolist (hook '(eshell-mode-hook pi-coding-agent-chat-mode-hook
+                                  pi-coding-agent-input-mode-hook))
+    (add-hook hook #'project-frame-sessions--enroll-utility-buffer))
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (project-frame-sessions--enroll-utility-buffer))))
+
+(defun project-frame-sessions--remove-desktop-integrations ()
+  "Remove only Desktop integrations installed by this package."
+  (dolist (hook '(eshell-mode-hook pi-coding-agent-chat-mode-hook
+                                  pi-coding-agent-input-mode-hook))
+    (remove-hook hook #'project-frame-sessions--enroll-utility-buffer))
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (project-frame-sessions--unenroll-utility-buffer)))
+  (dolist (registration project-frame-sessions--desktop-handler-registrations)
+    (setq desktop-buffer-mode-handlers
+          (delq registration desktop-buffer-mode-handlers)))
+  (setq project-frame-sessions--desktop-handler-registrations nil))
 
 (defun project-frame-sessions--desktop-frameset-form (form)
   "Extract a quoted Desktop frameset value from FORM, or nil."
@@ -752,7 +1192,8 @@ When EXPLICIT is non-nil, its root and proposed name are authoritative."
 
 (defun project-frame-sessions--event-dirty (&optional frame &rest _)
   "Mark the affected enrolled graphical FRAME dirty.
-Hooks that do not supply a frame, including buffer-list hooks and tab hooks,
+Hooks that do not supply a frame, including `buffer-list-update-hook' and tab
+hooks,
 fall back to the selected frame."
   (when project-frame-sessions-mode
     (project-frame-sessions--mark-frame-dirty
@@ -783,14 +1224,18 @@ fall back to the selected frame."
                    (desktop-file-name-format 'absolute)
                    (desktop-base-file-name project-frame-sessions--desktop-name)
                    (frameset-filter-alist
-                    (cons '(tabs . project-frame-sessions--filter-tabs)
-                          frameset-filter-alist)))
+                    (append
+                     `((,project-frame-sessions--excluded-buffers-parameter
+                        . :never)
+                       (tabs . project-frame-sessions--filter-tabs))
+                     frameset-filter-alist)))
                (desktop-save stage t)))))
       (dolist (pair old-parameters)
         (when (frame-live-p (car pair))
           (set-frame-parameter (car pair) 'desktop-dont-save (cdr pair)))))))
 
 (defun project-frame-sessions--stage-directory (id token)
+  "Return the recovery stage directory for session ID and TOKEN."
   (expand-file-name (format ".stage-%s-%s/" id token)
                     (project-frame-sessions--recovery-directory)))
 
@@ -1188,14 +1633,25 @@ recent Emacs versions, so capture it when Desktop offers to restore it."
              (desktop-restore-eager t) (desktop-missing-file-warning nil)
              (desktop-after-read-hook nil) (desktop-saved-frameset nil)
              (desktop-base-file-name base)
+             (project-frame-sessions--utility-restore-cache
+              (make-hash-table :test #'equal))
              captured-frameset)
          (unwind-protect
              (progn
-               (cl-letf (((symbol-function 'desktop-restore-frameset)
-                          (lambda ()
-                            (setq captured-frameset desktop-saved-frameset))))
-                 (with-selected-frame frame
-                   (desktop-read directory)))
+               (let ((create-buffer (symbol-function 'desktop-create-buffer)))
+                 (cl-letf (((symbol-function 'desktop-restore-frameset)
+                            (lambda ()
+                              (setq captured-frameset desktop-saved-frameset)))
+                           ((symbol-function 'desktop-create-buffer)
+                            (lambda (&rest args)
+                              (let ((buffer (apply create-buffer args)))
+                                (when (buffer-live-p buffer)
+                                  (cl-pushnew
+                                   buffer
+                                   project-frame-sessions--desktop-restored-buffers))
+                                buffer))))
+                   (with-selected-frame frame
+                     (desktop-read directory))))
                (unless (and (frameset-p captured-frameset)
                             (= (length (frameset-states captured-frameset)) 1))
                  (error "Session %s snapshot does not contain exactly one frame"
@@ -1242,12 +1698,17 @@ recent Emacs versions, so capture it when Desktop offers to restore it."
       (select-frame-set-input-focus owner)
       (throw 'live owner))
     (let* ((before-frames (frame-list))
+           (outgoing-buffers
+            (and save-current (project-frame-sessions--tab-buffers frame)))
+           (prior-excluded
+            (and save-current (project-frame-sessions--excluded-buffers frame)))
            (rollback (frameset-save (list frame) :filters frameset-filter-alist))
            (old-id (project-frame-sessions--frame-id frame))
            (old-deleted (frame-parameter frame
                                          project-frame-sessions--deleted-parameter))
            (old-root (frame-parameter frame 'project-frame-sessions-root))
            (old-directory (with-selected-frame frame default-directory))
+           (project-frame-sessions--desktop-restored-buffers nil)
            restore-error)
       (condition-case err
           (progn
@@ -1274,6 +1735,11 @@ recent Emacs versions, so capture it when Desktop offers to restore it."
             (when (plist-get entry :root)
               (with-selected-frame frame
                 (setq default-directory (plist-get entry :root))))
+            (when save-current
+              (project-frame-sessions--complete-current-frame-switch
+               frame outgoing-buffers prior-excluded
+               (append project-frame-sessions--desktop-restored-buffers
+                       (project-frame-sessions--active-workspace-buffers frame))))
             (select-frame-set-input-focus frame)
             (when project-frame-sessions-post-restore-function
               (run-at-time 0 nil project-frame-sessions-post-restore-function frame))
@@ -1294,6 +1760,19 @@ recent Emacs versions, so capture it when Desktop offers to restore it."
                   (setq default-directory old-directory))
                 (select-frame-set-input-focus frame))
             (error (push err rollback-errors)))
+          (when save-current
+            ;; Desktop may have displayed newly loaded buffers before the
+            ;; failure.  Keep them alive, but do not let the frame's
+            ;; historical buffer list enroll them in the rolled-back session.
+            (project-frame-sessions--set-excluded-buffers
+             frame
+             (cl-remove-duplicates
+              (append
+               prior-excluded
+               (cl-set-difference
+                project-frame-sessions--desktop-restored-buffers
+                outgoing-buffers :test #'eq))
+              :test #'eq)))
           (when rollback-errors
             (project-frame-sessions--warn
              "Session %s restore rollback also failed: %s"
@@ -1305,17 +1784,38 @@ recent Emacs versions, so capture it when Desktop offers to restore it."
           (signal (car restore-error) (cdr restore-error))))
       frame)))
 
-(defun project-frame-sessions--enroll-project (frame project)
-  "Open tagged PROJECT in FRAME and transactionally enroll the frame."
-  (let ((root (plist-get project :root)))
+(defun project-frame-sessions--enroll-project (frame project &optional switch-current)
+  "Open tagged PROJECT in FRAME and transactionally enroll the frame.
+When SWITCH-CURRENT is non-nil, detach the outgoing session and apply the
+configured buffer cleanup only after the new project's first save succeeds."
+  (let* ((root (plist-get project :root))
+         (outgoing-buffers
+          (and switch-current (project-frame-sessions--tab-buffers frame)))
+         (prior-excluded
+          (and switch-current (project-frame-sessions--excluded-buffers frame))))
     (set-frame-parameter frame 'project-frame-sessions-root root)
+    (when switch-current
+      (set-frame-parameter frame project-frame-sessions--id-parameter nil)
+      (set-frame-parameter frame project-frame-sessions--deleted-parameter nil))
     (with-selected-frame frame
       (setq default-directory root)
       (require 'dired)
       (dired root)
       ;; Save only after Dired has installed its buffer and window state.
-      (project-frame-sessions--save-frame-internal
-       frame t (list :root root :name (plist-get project :name))))
+      (let* ((destination
+              (project-frame-sessions--active-workspace-buffers frame))
+             (save-exclusions
+              (and switch-current
+                   (cl-set-difference
+                    (cl-remove-duplicates
+                     (append prior-excluded outgoing-buffers) :test #'eq)
+                    destination :test #'eq))))
+        (let ((project-frame-sessions--save-buffer-exclusions save-exclusions))
+          (project-frame-sessions--save-frame-internal
+           frame t (list :root root :name (plist-get project :name))))
+        (when switch-current
+          (project-frame-sessions--complete-current-frame-switch
+           frame outgoing-buffers prior-excluded destination))))
     (select-frame-set-input-focus frame)
     frame))
 
@@ -1328,7 +1828,8 @@ recent Emacs versions, so capture it when Desktop offers to restore it."
       ('project
        ;; Project failures intentionally leave this frame available for retry.
        (project-frame-sessions--enroll-project
-        (if new-frame-p (make-frame) (selected-frame)) candidate))
+        (if new-frame-p (make-frame) (selected-frame)) candidate
+        (not new-frame-p)))
       ('session
        (let* ((entry (plist-get candidate :entry))
               (owner (project-frame-sessions--find-live-frame
@@ -1359,9 +1860,10 @@ a session.  Canceling selection creates no frame."
 ;;;###autoload
 (defun project-frame-sessions-restore-current-frame ()
   "Select a session or remembered project for the selected frame.
-Session restoration rolls back on failure.  A project opens in Dired and is
-then enrolled; project open or save failures intentionally leave the frame at
-the project for manual recovery."
+Session restoration rolls back on failure.  Outgoing buffers are handled by
+`project-frame-sessions-kill-buffers-on-switch'.  A project opens in Dired and
+is then enrolled; project open or save failures intentionally leave the frame
+at the project for manual recovery."
   (interactive)
   (project-frame-sessions--route-restore nil))
 
@@ -1399,6 +1901,7 @@ The stable ID and snapshot path do not change."
     name))
 
 (defun project-frame-sessions--trash-metadata-file (trash)
+  "Return the metadata file in TRASH."
   (expand-file-name "metadata.eld" trash))
 
 (defun project-frame-sessions--trash-entries ()
@@ -1729,7 +2232,7 @@ the explicit user choice to make recovered data active."
   (let ((entries (project-frame-sessions--trash-entries)))
     (unless entries (user-error "No soft-deleted frame sessions"))
     (when (yes-or-no-p
-           (format "Permanently purge %d deleted session(s)? This cannot be undone. "
+           (format "Permanently purge %d deleted session(s)?  This cannot be undone; continue? "
                    (length entries)))
       (project-frame-sessions--with-lock
         (dolist (entry entries)
@@ -1750,27 +2253,50 @@ the explicit user choice to make recovered data active."
       (message "Permanently purged %d deleted session(s)" (length entries)))))
 
 (defun project-frame-sessions--delete-frame-hook (frame)
-  "Save enrolled FRAME before deletion, aborting deletion on failure."
+  "Save enrolled FRAME and schedule one post-deletion finalizer.
+Cleanup is deferred so later deletion hooks can still veto the close.  Emacs
+may invoke `delete-frame-functions' recursively, so repeated calls for the
+same pending close are ignored."
   (when (and project-frame-sessions-mode
              (not project-frame-sessions--shutdown)
              (not (eq frame project-frame-sessions--delete-suppressed))
-             (project-frame-sessions--frame-id frame))
-    (project-frame-sessions--save-frame-internal frame t)))
+             (project-frame-sessions--frame-id frame)
+             (not (gethash frame project-frame-sessions--pending-frame-closes)))
+    (puthash frame t project-frame-sessions--pending-frame-closes)
+    (condition-case err
+        (let ((buffers
+               (progn
+                 (project-frame-sessions--save-frame-internal frame t)
+                 (unless project-frame-sessions-preserve-buffers-after-frame-close
+                   (project-frame-sessions--frame-close-candidates frame)))))
+          ;; Schedule even under the preserve policy so a vetoed close clears
+          ;; the recursion guard and a later close can save normally.
+          (run-at-time 0 nil #'project-frame-sessions--finalize-frame-close
+                       frame buffers))
+      ((error quit)
+       (remhash frame project-frame-sessions--pending-frame-closes)
+       (signal (car err) (cdr err))))))
 
 ;;;###autoload
 (defun project-frame-sessions-delete-frame (&optional frame before-delete)
   "Save and close enrolled FRAME.
 After saving, call optional BEFORE-DELETE with FRAME before closing it.  A
-failed save or callback leaves the frame open."
+failed save, callback, or deletion leaves its buffers alive.  On successful
+close, buffer retention follows
+`project-frame-sessions-preserve-buffers-after-frame-close'."
   (interactive)
   (let ((frame (or frame (selected-frame))))
     (unless (project-frame-sessions--frame-id frame)
       (user-error "Frame is not enrolled in a session"))
     (project-frame-sessions--save-frame-internal frame t)
-    (when before-delete
-      (funcall before-delete frame))
-    (let ((project-frame-sessions--delete-suppressed frame))
-      (delete-frame frame))))
+    (let ((buffers (unless project-frame-sessions-preserve-buffers-after-frame-close
+                     (project-frame-sessions--frame-close-candidates frame))))
+      (when before-delete
+        (funcall before-delete frame))
+      (let ((project-frame-sessions--delete-suppressed frame))
+        (delete-frame frame))
+      (unless (frame-live-p frame)
+        (project-frame-sessions--dispose-closed-frame-buffers buffers)))))
 
 (defun project-frame-sessions--dirty-frames ()
   "Return enrolled live frames whose sessions are dirty."
@@ -1870,11 +2396,13 @@ The mode never restores at startup and never enrolls an ordinary non-project
 frame merely because the mode is enabled."
   :global t
   (project-frame-sessions--remove-hooks)
+  (project-frame-sessions--remove-desktop-integrations)
   (when (timerp project-frame-sessions--idle-timer)
     (cancel-timer project-frame-sessions--idle-timer))
   (setq project-frame-sessions--idle-timer nil
         project-frame-sessions--shutdown nil
         project-frame-sessions--preflight-complete nil)
+  (clrhash project-frame-sessions--pending-frame-closes)
   (maphash (lambda (_id runtime)
              (project-frame-sessions--cancel-runtime-timer runtime))
            project-frame-sessions--runtimes)
@@ -1887,6 +2415,7 @@ frame merely because the mode is enabled."
        (setq project-frame-sessions-mode nil)
        (signal (car err) (cdr err))))
     (project-frame-sessions--install-hooks)
+    (project-frame-sessions--register-desktop-integrations)
     (project-frame-sessions--scan-recovery)
     (maphash
      (lambda (id runtime)

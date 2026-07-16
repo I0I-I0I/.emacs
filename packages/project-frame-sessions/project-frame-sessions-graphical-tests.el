@@ -1,6 +1,7 @@
 ;;; project-frame-sessions-graphical-tests.el --- Graphical tests -*- lexical-binding: t; -*-
 
 (require 'ert)
+(require 'cl-lib)
 (require 'project-frame-sessions)
 
 (defmacro project-frame-sessions-graphical-tests--with-store (&rest body)
@@ -13,12 +14,17 @@
      (unwind-protect (progn ,@body)
        (ignore-errors (delete-directory directory t)))))
 
+(defun project-frame-sessions-graphical-tests--make-frame (parameters)
+  "Create a graphical frame on the current frame's display with PARAMETERS."
+  (make-frame-on-display (frame-parameter nil 'display) parameters))
+
 (ert-deftest project-frame-sessions-graphical-real-desktop-round-trip ()
   (unless (display-graphic-p) (ert-skip "No graphical display"))
   (project-frame-sessions-graphical-tests--with-store
     (let* ((source (make-temp-file "pfs-graphical-buffer-" nil ".txt" "saved text"))
            (buffer (find-file-noselect source))
-           (frame (make-frame '((name . "PFS graphical test"))))
+           (frame (project-frame-sessions-graphical-tests--make-frame
+                   '((name . "PFS graphical test"))))
            entry)
       (unwind-protect
           (progn
@@ -46,6 +52,73 @@
         (when (buffer-live-p buffer) (kill-buffer buffer))
         (when-let* ((second (get-buffer "*pfs-second*"))) (kill-buffer second))
         (ignore-errors (delete-file source))))))
+
+(ert-deftest project-frame-sessions-graphical-frame-close-buffer-policy ()
+  (unless (display-graphic-p) (ert-skip "No graphical display"))
+  (project-frame-sessions-graphical-tests--with-store
+    (dolist (preserve '(t nil))
+      (let* ((frame (project-frame-sessions-graphical-tests--make-frame
+                     `((name . ,(format "PFS close %s" preserve)))))
+             (buffer (generate-new-buffer
+                      (format "*pfs-close-%s*" preserve))))
+        (unwind-protect
+            (progn
+              (with-selected-frame frame (switch-to-buffer buffer))
+              (let ((project-frame-sessions-discovery-function #'ignore))
+                (project-frame-sessions-save frame))
+              (let ((project-frame-sessions-preserve-buffers-after-frame-close
+                     preserve))
+                (project-frame-sessions-delete-frame frame))
+              (should-not (frame-live-p frame))
+              (should (eq (buffer-live-p buffer) preserve)))
+          (when (frame-live-p frame)
+            (let ((project-frame-sessions--delete-suppressed frame))
+              (delete-frame frame t)))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
+
+(ert-deftest project-frame-sessions-graphical-eshell-desktop-round-trip ()
+  (unless (display-graphic-p) (ert-skip "No graphical display"))
+  (project-frame-sessions-graphical-tests--with-store
+    (let* ((work-directory (make-temp-file "pfs-eshell-work-" t))
+           (frame (project-frame-sessions-graphical-tests--make-frame
+                   '((name . "PFS Eshell restore"))))
+           (project-frame-sessions-autosave-interval nil)
+           eshell-buffer entry)
+      (unwind-protect
+          (progn
+            (project-frame-sessions-mode 1)
+            (with-selected-frame frame
+              (let ((default-directory (file-name-as-directory work-directory)))
+                (require 'eshell)
+                (setq eshell-buffer (eshell t)))
+              (tab-bar-mode 1)
+              (tab-bar-rename-tab "eshell"))
+            (let ((project-frame-sessions-discovery-function #'ignore))
+              (setq entry (project-frame-sessions-save frame)))
+            (when (buffer-live-p eshell-buffer) (kill-buffer eshell-buffer))
+            (with-selected-frame frame
+              (switch-to-buffer (get-buffer-create "*scratch*")))
+            (project-frame-sessions--restore-entry entry frame nil)
+            (let ((restored
+                   (cl-find-if
+                    (lambda (buffer)
+                      (with-current-buffer buffer
+                        (and (derived-mode-p 'eshell-mode)
+                             (equal default-directory
+                                    (file-name-as-directory work-directory)))))
+                    (buffer-list))))
+              (should (buffer-live-p restored))))
+        (project-frame-sessions-mode -1)
+        (when (frame-live-p frame)
+          (let ((project-frame-sessions--delete-suppressed frame))
+            (delete-frame frame t)))
+        (dolist (buffer (buffer-list))
+          (when (with-current-buffer buffer
+                  (and (derived-mode-p 'eshell-mode)
+                       (equal default-directory
+                              (file-name-as-directory work-directory))))
+            (kill-buffer buffer)))
+        (ignore-errors (delete-directory work-directory t))))))
 
 (provide 'project-frame-sessions-graphical-tests)
 ;;; project-frame-sessions-graphical-tests.el ends here

@@ -82,6 +82,29 @@
 (setq use-package-always-ensure t
       use-package-verbose nil)
 
+(setq load-prefer-newer t)
+
+(use-package gcmh
+  :ensure t
+  :demand t
+  :custom
+  (gcmh-high-cons-threshold (* 64 1024 1024))
+  (gcmh-idle-delay 15)
+  :config
+  (gcmh-mode 1))
+
+(use-package compile-angel
+  :demand t
+  :config
+  (setq compile-angel-verbose t
+        package-native-compile t)
+
+  (push "/init.el" compile-angel-excluded-path-suffixes)
+  (push "/early-init.el" compile-angel-excluded-path-suffixes)
+
+  ;; using `load' or `require'.
+  (compile-angel-on-load-mode 1))
+
 ;; Import PATH and related environment from the user's login shell.
 ;; This is especially important for daemon sessions started by systemd/launchd,
 ;; where Emacs otherwise inherits a minimal environment and misses tools managed
@@ -108,10 +131,9 @@
     (setq display-line-numbers-type 'relative)
     (setq-default display-line-numbers-width 3)
     :bind
-    ("C-x L" . display-line-numbers-mode))
+    ("C-x l" . display-line-numbers-mode))
 
-  (setq gc-cons-threshold (* 64 1024 1024)
-        gc-cons-percentage 0.1
+  (setq gc-cons-percentage 0.1
         read-process-output-max (* 4 1024 1024)
         auto-save-default t
         make-backup-files t
@@ -142,7 +164,7 @@
   (scroll-bar-mode -1)
 
   (setq delete-pair-push-mark t
-        kill-region-dwim 'emacs-word
+        kill-region-dwim 'unix-word
         native-comp-async-on-battery-power nil
         view-lossage-auto-refresh t
         display-fill-column-indicator-warning nil
@@ -173,8 +195,6 @@
   (add-hook 'buffer-menu-mode-hook #'my/disable-visual-line-and-truncate)
 
   (setq use-short-answers t)
-  (setq savehist-additional-variables '(register-alist))
-  (savehist-mode 1)
 
   (setq mouse-wheel-scroll-amount '(1 ((shift) . 1))
         mouse-wheel-progressive-speed nil
@@ -197,6 +217,11 @@
 
   (when (fboundp 'pixel-scroll-precision-mode)
     (pixel-scroll-precision-mode 1))
+
+  (dolist (mode '(markdown-ts-mode org-mode))
+    (add-hook (intern (format "%s-hook" mode))
+              (lambda ()
+                (setq-local visual-line-fringe-indicators '(nil right-curly-arrow)))))
 
   (put 'narrow-to-region 'disabled nil)
   (put 'narrow-to-page 'disabled nil)
@@ -571,19 +596,15 @@ With a prefix argument, prompt for OPACITY instead of toggling."
         (when (my/frame-local-buffer-p buffer frame)
           (kill-buffer buffer)))))
 
-  (defconst my/auto-close-tab-name-regexp
-    "\\`\\(?:eshell\\|magit\\|pi\\|pi-agent\\|vterm\\)\\(?:\\'\\|: \\)"
-    "Regexp matching dedicated utility tabs to close before frame/desktop save/Emacs exit.")
-
   (defun my/auto-close-tab-p (tab)
-    "Return non-nil when TAB is a dedicated utility tab."
+    "Return non-nil when TAB is a non-restorable utility tab."
     (when-let* ((name (alist-get 'name tab)))
       (string-match-p my/auto-close-tab-name-regexp name)))
 
   (defun my/close-utility-tabs-in-frame (&optional frame)
-    "Close dedicated pi-agent, Eshell, Vterm and Magit tabs in FRAME.
-If a utility tab is the only tab left, reset it to a scratch/main tab so it is
-not persisted as a utility workspace when Emacs exits."
+    "Close dedicated Vterm and Magit tabs in FRAME.
+If such a tab is the only tab left, reset it to a scratch/main tab so it is not
+persisted as a utility workspace when Emacs exits."
     (let ((frame (or frame (selected-frame))))
       (when (and (frame-live-p frame) (fboundp 'tab-bar-tabs))
         (with-selected-frame frame
@@ -614,11 +635,11 @@ kill buffers that are local to the current frame before deleting it."
     (interactive "P")
     (if (cdr (frame-list))
         (if (fboundp 'project-frame-sessions-delete-frame)
-            (project-frame-sessions-delete-frame
-             (selected-frame)
-             (lambda (frame)
-               (when kill-local-buffers
-                 (my/kill-frame-local-buffers frame))))
+            (if kill-local-buffers
+                (let ((project-frame-sessions-preserve-buffers-after-frame-close
+                       nil))
+                  (project-frame-sessions-delete-frame (selected-frame)))
+              (project-frame-sessions-delete-frame (selected-frame)))
           (when kill-local-buffers
             (my/kill-frame-local-buffers (selected-frame)))
           (delete-frame))
@@ -630,22 +651,6 @@ kill buffers that are local to the current frame before deleting it."
     "Delete current frame after killing buffers local to it."
     (interactive)
     (my/delete-frame-or-emacs t))
-
-
-  ;; Vim-like C-r C-w for minibuffer prompts.
-  (defun my/minibuffer-insert-symbol-at-point ()
-    "Insert the symbol at point from the buffer that opened the minibuffer."
-    (interactive)
-    (let* ((window (minibuffer-selected-window))
-           (text (when (window-live-p window)
-                   (with-current-buffer (window-buffer window)
-                     (save-excursion
-                       (goto-char (window-point window))
-                       (or (thing-at-point 'symbol t)
-                           (thing-at-point 'word t)))))))
-      (unless text
-        (user-error "No symbol at point"))
-      (insert (substring-no-properties text))))
 
   (defun my/copy-current-line-number ()
     "Copy the current line number to the kill ring."
@@ -681,9 +686,9 @@ kill buffers that are local to the current frame before deleting it."
    ("M-S-<left>" . org-decrease-number-at-point)
    ("C-x m" . global-mode-line-invisible-mode)
    ("C-c L" . my/copy-current-line-number)
-   ("C-c p" . my/copy-current-path)
+   ("C-c P" . my/copy-current-path)
    ("C-x f" . toggle-frame-fullscreen)
-   ("C-c t" . my/toggle-transparency)
+   ("C-c T" . my/toggle-transparency)
    ("C-x 5 n" . my/new-workflow-frame)
    ("C-x 5 p" . my/new-project-frame)
    ("C-x 5 d" . my/change-frame-default-directory)
@@ -698,7 +703,6 @@ kill buffers that are local to the current frame before deleting it."
    ("C-x C-S-b" . ibuffer)
    ("C-x b" . switch-to-buffer)
    ("C-x B" . switch-to-buffer-other-window)
-   ("C-x k" . kill-current-buffer)
 
    ("C-s" . my/isearch-forward-dwim)
    ("C-'" . my/jump-to-first-match-char-in-line)
@@ -711,16 +715,13 @@ kill buffers that are local to the current frame before deleting it."
    (:map minibuffer-local-must-match-map
          ("M-i" . my/minibuffer-insert-region-or-symbol))
    (:map minibuffer-local-filename-completion-map
-         ("M-i" . my/minibuffer-insert-region-or-symbol))
+         ("M-i" . my/minibuffer-insert-region-or-symbol))))
 
-   :map minibuffer-local-map
-   ("M-l" . my/minibuffer-insert-symbol-at-point)
-   :map minibuffer-local-ns-map
-   ("M-l" . my/minibuffer-insert-symbol-at-point)
-   :map minibuffer-local-completion-map
-   ("M-l" . my/minibuffer-insert-symbol-at-point)
-   :map minibuffer-local-must-match-map
-   ("M-l" . my/minibuffer-insert-symbol-at-point)))
+(use-package savehist
+  :ensure nil
+  :config
+  (setq savehist-additional-variables '(register-alist))
+  (savehist-mode 1))
 
 ;;; Frames, tabs, and workspaces
 (use-package tab-bar
@@ -747,14 +748,26 @@ kill buffers that are local to the current frame before deleting it."
         (user-error "No tab number %s" number))
 	  (tab-bar-select-tab number)))
 
+  (defun my/tab-bar-move-tab-to-number (number)
+    "Move the current tab to position NUMBER, where 1 is the first tab."
+    (interactive "nMove tab to position: ")
+    (let ((tabs (tab-bar-tabs)))
+	  (unless (and (integerp number) (<= 1 number) (<= number (length tabs)))
+        (user-error "No tab position %s" number))
+	  (tab-bar-move-tab-to number)))
+
   (defun my/define-tab-number-keys (map)
-    "Bind C-c 1..C-c 9 in MAP to switch to tab-bar tabs 1..9."
+    "Bind M-1..M-9 to select tabs and C-M-1..C-M-9 to move tabs in MAP."
     (dotimes (index 9)
 	  (let ((number (1+ index)))
         (define-key map (kbd (format "M-%d" number))
                     (lambda ()
 			          (interactive)
-			          (my/tab-bar-select-tab-by-number number))))))
+			          (my/tab-bar-select-tab-by-number number)))
+        (define-key map (kbd (format "C-M-%d" number))
+                    (lambda ()
+			          (interactive)
+			          (my/tab-bar-move-tab-to-number number))))))
 
   (my/define-tab-number-keys my/override-map)
 
@@ -765,6 +778,8 @@ kill buffers that are local to the current frame before deleting it."
 		      ("C-M-i" . tab-bar-switch-to-prev-tab)
 		      ("C-M-<tab>" . tab-bar-switch-to-prev-tab)
 		      ("C-M-o" . tab-bar-switch-to-next-tab)
+		      ("C-M-S-i" . tab-bar-move-tab-backward)
+		      ("C-M-S-o" . tab-bar-move-tab)
 		      ("C-<tab>" . my/tab-bar-switch-to-recent-or-prev-tab)))
 
 (use-package tabspaces
@@ -838,6 +853,14 @@ With prefix argument KILL, really kill the current buffer."
                           (not (member (if (stringp b) b (car b))
 					                   (my/tabspaces--local-buffer-name-list)))))))
     (switch-to-buffer buffer))
+
+  (defun my/tabspaces-close-workspace-dwim (&optional kill-buffers)
+    "Close the current workspace.
+With prefix argument KILL-BUFFERS, first kill its local buffers."
+    (interactive "P")
+    (if kill-buffers
+        (tabspaces-kill-buffers-close-workspace)
+      (tabspaces-close-workspace)))
   :custom
   ;; Make normal buffer switching tab-local.
   (tabspaces-use-filtered-buffers-as-default t)
@@ -864,6 +887,7 @@ With prefix argument KILL, really kill the current buffer."
 		      ("C-x B" . my/tabspaces-switch-to-buffer-other-frame)
 		      ("C-x 5 b" . my/tabspaces-switch-to-buffer-other-frame)
 		      ("C-x k" . my/tabspaces-remove-current-buffer-dwim)
+		      ("C-x t 0" . my/tabspaces-close-workspace-dwim)
 		      ("C-x t TAB" . tabspaces-switch-buffer-and-tab)
 		      ("C-x t n" . tabspaces-switch-or-create-workspace)
 		      ("C-x t p" . tabspaces-open-or-create-project-and-workspace)
@@ -985,7 +1009,7 @@ is non-nil, return only when it returns non-nil."
   :custom
   (fontaine-presets
    '((maple-mono
-	  :default-family "Maple Mono NF CN"
+	  :default-family "Maple Mono"
 	  :default-height 170
 	  :line-spacing 1)
      (cascadia
@@ -1053,6 +1077,31 @@ is non-nil, return only when it returns non-nil."
 (use-package editorconfig
   :ensure t
   :config
+  (defun my/editorconfig-svelte-indent-offsets (&optional properties)
+    "Apply Svelte's EditorConfig indent size to its embedded languages."
+    (when (derived-mode-p 'svelte-ts-mode)
+      (let* ((properties (or properties
+                             (and buffer-file-name
+                                  (editorconfig-call-get-properties-function
+                                   buffer-file-name))))
+             (indent-size (and properties (gethash 'indent_size properties)))
+             (offset (if (and indent-size
+                              (editorconfig-string-integer-p indent-size))
+                         (string-to-number indent-size)
+                       svelte-ts-mode-indent-offset)))
+        (setq-local js-indent-level offset
+                    ;; Emacs 31+ renamed this variable; set both names so the
+                    ;; Svelte embedded TypeScript rules follow EditorConfig.
+                    typescript-ts-indent-offset offset
+                    typescript-ts-mode-indent-offset offset
+                    css-indent-offset offset))))
+
+  ;; Svelte buffers use separate indentation variables for markup and for
+  ;; embedded JavaScript, TypeScript, and CSS.
+  (add-to-list 'editorconfig-indentation-alist
+               '(svelte-ts-mode svelte-ts-mode-indent-offset))
+  (add-hook 'editorconfig-after-apply-functions
+            #'my/editorconfig-svelte-indent-offsets)
   (editorconfig-mode 1))
 
 ;; Spelling
@@ -1086,12 +1135,36 @@ is non-nil, return only when it returns non-nil."
 (use-package embark
   :ensure t
   :bind
-  (("M-." . embark-act)
+  (("C-." . embark-act)
+   ("C-c ." . embark-act)
    ("C-;" . embark-dwim)
-   ("C-h B" . embark-bindings))
-
+   :map minibuffer-local-map
+   ("C-c ." . embark-act)
+   ("C-c C-e" . embark-export))
   :init
   (setq prefix-help-command #'embark-prefix-help-command))
+
+(use-package embark-consult
+  :ensure t
+  :after (embark consult))
+
+(use-package consult
+  :ensure t
+  :bind (("M-s s" . consult-line)
+         ("M-g g" . consult-goto-line)
+         ("M-y" . consult-yank-pop)
+         ("M-s o" . consult-outline)
+         ("M-s O" . consult-multi-occur)
+         ("M-s p" . consult-project-regexp)
+         ("M-s g" . consult-ripgrep)
+         ("M-s f" . consult-fd)
+         ("M-s e" . consult-flymake)
+         ("M-s i" . consult-imenu)
+         ("M-s I" . consult-imenu-multi))
+  :config
+  (consult-customize
+   consult-ripgrep consult-git-grep consult-grep
+   :preview-key '(:debounce 0.4 any)))
 
 (use-package imenu
   :ensure nil
@@ -1127,10 +1200,6 @@ is non-nil, return only when it returns non-nil."
   (add-to-list 'grep-find-ignored-files "*.map")
   (add-to-list 'grep-find-ignored-files "*.lock")
   :bind
-  ("M-s o" . occur)
-  ("M-s O" . multi-occur)
-  ("M-s p" . project-find-regexp)
-  ("M-s g" . rgrep)
   (:map isearch-mode-map
         ("M-i" . my/isearch-yank-region-or-symbol)))
 
@@ -1145,6 +1214,27 @@ is non-nil, return only when it returns non-nil."
             :branch "master")
   :bind ("C-q" . emacs-surround))
 
+;;; Snippets
+
+(use-package yasnippet
+  :ensure t
+  :demand t
+  :custom
+  (yas-snippet-dirs (list (expand-file-name "snippets" user-emacs-directory)))
+  :config
+  (yas-global-mode 1)
+  :bind
+  (("C-c y i" . yas-insert-snippet)
+   ("C-c y n" . yas-new-snippet)
+   ("C-c y v" . yas-visit-snippet-file)))
+
+(use-package yasnippet-snippets
+  :ensure t
+  :after yasnippet
+  :config
+  (add-to-list 'yas-snippet-dirs yasnippet-snippets-dir t)
+  (yas-reload-all))
+
 ;;; Completion and minibuffer
 (use-package corfu
   :ensure t
@@ -1152,8 +1242,8 @@ is non-nil, return only when it returns non-nil."
   (eshell-mode . (lambda () (setq-local corfu-auto nil)))
   :custom
   (corfu-auto t)
-  (corfu-auto-delay 0.1)
-  (corfu-auto-prefix 1)
+  (corfu-auto-delay 0.35)
+  (corfu-auto-prefix 2)
   (corfu-cycle t)
   (corfu-preselect 'prompt)
   (corfu-quit-no-match 'separator)
@@ -1203,16 +1293,61 @@ is non-nil, return only when it returns non-nil."
 
 ;;; Theme
 
-(use-package lambda-themes
-  :vc (:url "https://github.com/Lambda-Emacs/lambda-themes"
+(use-package modus-themes
+  :vc (:url "https://gitlab.com/protesilaos/modus-themes"
             :rev :newest
             :branch "main")
+  :ensure t
   :demand t
+  :init
+
+  (setq modus-themes-to-toggle '(modus-operandi modus-vivendi)
+        modus-themes-mixed-fonts t
+        modus-themes-variable-pitch-ui t
+        modus-themes-italic-constructs t
+        modus-themes-bold-constructs t
+        modus-themes-completions '((t . (bold)))
+        modus-themes-prompts '(bold)
+
+        modus-themes-common-palette-overrides
+        '(
+          ;; Syntax: monochrome, differentiated by weight/slant.
+          (builtin       fg-main)
+          (comment       fg-dim)
+          (constant      fg-main)
+          (docstring     fg-dim)
+          (fnname        fg-main)
+          (fnname-call   fg-main)
+          (keyword       fg-main)
+          (preprocessor  fg-main)
+          (property      fg-main)
+          (string        fg-main)
+          (type          fg-main)
+          (variable      fg-main)
+          (variable-use  fg-main)
+
+          ;; Faces used heavily by Emacs treesit modes.
+          (bracket       fg-main)
+          (delimiter     fg-main)
+          (number        fg-main)
+          (operator      fg-main)
+          (punctuation   fg-main)
+
+          ;; display-line-numbers-mode
+          (fg-line-number-inactive fg-dim)
+          (fg-line-number-active   fg-main)
+          (bg-line-number-inactive unspecified)
+          (bg-line-number-active   unspecified)
+
+          ;; tab-bar-mode
+          (bg-tab-bar    bg-main)
+          (bg-tab-current bg-active)
+          (bg-tab-other  bg-main)
+
+          ;; Keep the editor surface uniform.
+          (fringe unspecified)))
   :config
-  (setq lambda-themes-set-italic-comments t
-        lambda-themes-set-italic-keywords t
-        lambda-themes-set-variable-pitch t)
-  (load-theme 'lambda-dark t))
+  (modus-themes-load-theme 'modus-vivendi)) ; modus-operandi
 
 ;;; IBuffer
 (use-package ibuffer
@@ -1283,93 +1418,89 @@ is non-nil, return only when it returns non-nil."
          ("C-c / c" . ibuffer-clear-filter-groups)))
 
 ;;; Tramp
+(setq auth-sources '("~/.authinfo.gpg"))
+(setq auth-source-cache-expiry 7200)
+
 (use-package tramp
   :ensure nil
   :defer t
   :init
-  (setq tramp-default-method "ssh")
-  (setq tramp-verbose 1)
-  (setq tramp-use-ssh-controlmaster-options nil)
+  (setq tramp-default-method "ssh"
+        tramp-verbose 1
+        remote-file-name-inhibit-cache 10)
+
   :config
-  (setq tramp-default-remote-shell "/bin/bash")
-  (setq tramp-remote-shell "/bin/bash")
-  (setq tramp-remote-shell-login '("-l"))
-  (setq tramp-remote-shell-args '("-c"))
-  (setq tramp-chunksize 2000)
-  (setq tramp-inline-compress-start-size 1000)
-  (setq remote-file-name-inhibit-cache nil)
-  (setq tramp-completion-reread-directory-timeout nil)
-  (setq tramp-auto-save-directory "~/.emacs.d/tramp-autosave/")
-  (setq auth-sources '("~/.authinfo.gpg"))
-  (setq auth-source-cache-expiry nil)
+  ;; (with-eval-after-load 'tramp-sh
+  ;;   (setq tramp-use-connection-share nil))
+
   (add-to-list 'backup-directory-alist
-		       (cons tramp-file-name-regexp "~/.emacs.d/tramp-backups/")))
+               (cons tramp-file-name-regexp nil)))
 
 ;;; Shells and terminals
-(use-package vterm
-  :ensure t
-  :commands (vterm)
-  :preface
-  (require 'project)
-  (require 'seq)
+;; (use-package vterm
+;;   :ensure t
+;;   :commands (vterm)
+;;   :preface
+;;   (require 'project)
+;;   (require 'seq)
 
-  (defvar my/vterm-return-tab nil
-    "Tab to return to when toggling away from the vterm tab.")
+;;   (defvar my/vterm-return-tab nil
+;;     "Tab to return to when toggling away from the vterm tab.")
 
-  (defvar-local my/vterm-tab-name nil
-    "Dedicated tab name for this vterm buffer.")
+;;   (defvar-local my/vterm-tab-name nil
+;;     "Dedicated tab name for this vterm buffer.")
 
-  (defun my/vterm-tab-name ()
-    "Return the dedicated vterm tab name for this frame."
-    "vterm")
+;;   (defun my/vterm-tab-name ()
+;;     "Return the dedicated vterm tab name for this frame."
+;;     "vterm")
 
-  (defun my/vterm--project-dir ()
-    "Return project root if available, else current `default-directory`."
-    (if-let* ((pr (project-current nil)))
-        (expand-file-name (project-root pr))
-	  (expand-file-name default-directory)))
+;;   (defun my/vterm--project-dir ()
+;;     "Return project root if available, else current `default-directory`."
+;;     (if-let* ((pr (project-current nil)))
+;;         (expand-file-name (project-root pr))
+;; 	  (expand-file-name default-directory)))
 
-  (defun my/vterm--buffer-p (b)
-    (with-current-buffer b
-	  (derived-mode-p 'vterm-mode)))
+;;   (defun my/vterm--buffer-p (b)
+;;     (with-current-buffer b
+;; 	  (derived-mode-p 'vterm-mode)))
 
-  (defun my/vterm--buf-dir (b)
-    "Return normalized `default-directory` for vterm buffer B."
-    (with-current-buffer b
-	  (expand-file-name default-directory)))
+;;   (defun my/vterm--buf-dir (b)
+;;     "Return normalized `default-directory` for vterm buffer B."
+;;     (with-current-buffer b
+;; 	  (expand-file-name default-directory)))
 
-  (defun my/vterm--find-by-dir (dir)
-    "Find an existing vterm buffer whose `default-directory` matches DIR."
-    (let ((target (expand-file-name dir)))
-	  (seq-find (lambda (b)
-                  (and (my/vterm--buffer-p b)
-			           (string= (my/vterm--buf-dir b) target)))
-                (buffer-list))))
+;;   (defun my/vterm--find-by-dir (dir)
+;;     "Find an existing vterm buffer whose `default-directory` matches DIR."
+;;     (let ((target (expand-file-name dir)))
+;; 	  (seq-find (lambda (b)
+;;                   (and (my/vterm--buffer-p b)
+;; 			           (string= (my/vterm--buf-dir b) target)))
+;;                 (buffer-list))))
 
-  (defun my/vterm--new-in-dir (dir)
-    "Create a new vterm buffer and start it in DIR."
-    (let ((default-directory dir))
-	  (vterm (generate-new-buffer-name
-		      (format "*vterm: %s*"
-			          (file-name-nondirectory
-			           (directory-file-name dir)))))))
+;;   (defun my/vterm--new-in-dir (dir)
+;;     "Create a new vterm buffer and start it in DIR."
+;;     (let ((default-directory dir))
+;; 	  (vterm (generate-new-buffer-name
+;; 		      (format "*vterm: %s*"
+;; 			          (file-name-nondirectory
+;; 			           (directory-file-name dir)))))))
 
-  (defun my/vterm-in-tab (&optional new)
-    "Open/toggle vterm in a dedicated project tab.
-With prefix argument NEW, always create a new vterm buffer."
-    (interactive "P")
-    (let ((dir (my/vterm--project-dir))
-          (vterm-tab (my/vterm-tab-name)))
-	  (my/with-dedicated-tab
-	   vterm-tab 'my/vterm-return-tab
-	   (lambda (_new-tab)
-         (let ((buf (and (not new) (my/vterm--find-by-dir dir))))
-           (if buf
-		       (switch-to-buffer buf)
-             (my/vterm--new-in-dir dir)))
-         (setq-local my/vterm-tab-name vterm-tab))
-	   t new)))
-  :bind ("C-c t" . my/vterm-in-tab))
+;;   (defun my/vterm-in-tab (&optional new)
+;;     "Open/toggle vterm in a dedicated project tab.
+;; With prefix argument NEW, always create a new vterm buffer."
+;;     (interactive "P")
+;;     (let ((dir (my/vterm--project-dir))
+;;           (vterm-tab (my/vterm-tab-name)))
+;; 	  (my/with-dedicated-tab
+;; 	   vterm-tab 'my/vterm-return-tab
+;; 	   (lambda (_new-tab)
+;;          (let ((buf (and (not new) (my/vterm--find-by-dir dir))))
+;;            (if buf
+;; 		       (switch-to-buffer buf)
+;;              (my/vterm--new-in-dir dir)))
+;;          (setq-local my/vterm-tab-name vterm-tab))
+;; 	   t new)))
+;;   :bind ("C-c t" . my/vterm-in-tab))
 
 (use-package eshell
   :ensure nil
@@ -1395,13 +1526,24 @@ With prefix argument NEW, always create a new vterm buffer."
   (defun my/eshell--current-dir ()
     (expand-file-name default-directory))
 
-  (defun my/eshell--find-by-dir (dir)
-    "Find an existing eshell buffer whose `default-directory` matches DIR."
-    (let ((target (expand-file-name dir)))
-	  (seq-find (lambda (b)
-                  (and (my/eshell--buffer-p b)
-			           (string= (my/eshell--buf-dir b) target)))
-                (buffer-list))))
+  (defun my/eshell--context (dir)
+    "Return the Tramp connection for DIR, or `local'."
+    (or (file-remote-p dir) 'local))
+
+  (defun my/eshell--find-related (dir)
+    "Find the Eshell most closely related to DIR.
+Prefer the same directory, then any shell on the same Tramp connection.  All
+local directories belong to one local context."
+    (let ((target (expand-file-name dir))
+          (context (my/eshell--context dir))
+          (buffers (seq-filter #'my/eshell--buffer-p (buffer-list))))
+      (or (seq-find (lambda (buffer)
+                      (string= (my/eshell--buf-dir buffer) target))
+                    buffers)
+          (seq-find (lambda (buffer)
+                      (equal (my/eshell--context (my/eshell--buf-dir buffer))
+                             context))
+                    buffers))))
 
   (defun my/eshell--new-in-dir (dir)
     "Create a new eshell buffer and start it in DIR."
@@ -1414,18 +1556,30 @@ With prefix argument NEW, always create a new vterm buffer."
   (defvar-local my/eshell-tab-name nil
     "Dedicated tab name for this eshell buffer.")
 
-  (defun my/eshell-tab-name ()
-    "Return the dedicated eshell tab name for this frame."
-    "eshell")
+  (defun my/eshell-tab-name (directory)
+    "Return the dedicated Eshell tab name for DIRECTORY.
+Local shells use `eshell'.  Tramp shells include their complete connection
+prefix, so different users, hosts, methods, and hops get distinct tabs."
+    (if-let* ((remote (file-remote-p directory)))
+        (format "eshell:%s"
+                (string-remove-prefix
+                 "/" (string-remove-suffix ":" remote)))
+      "eshell"))
 
   (defun my/eshell--open-in-tab (dir &optional new)
-    "Open/toggle eshell for DIR in a dedicated project tab.
-With NEW, always create a new eshell buffer."
-    (let ((eshell-tab (my/eshell-tab-name)))
+    "Open or toggle the Eshell related to DIR in its dedicated tab.
+Local shells share the `eshell' tab.  Each Tramp connection gets a distinct
+remote tab.  With NEW, always create a new Eshell buffer in that tab."
+    (let ((eshell-tab (my/eshell-tab-name dir)))
+      ;; Migrate remote tabs saved before connection-specific names were used.
+      (when (and (derived-mode-p 'eshell-mode)
+                 (file-remote-p default-directory)
+                 (string= (my/current-tab-name) "eshell"))
+        (tab-bar-rename-tab eshell-tab))
 	  (my/with-dedicated-tab
 	   eshell-tab 'my/eshell-return-tab
 	   (lambda (_new-tab)
-         (let ((buf (and (not new) (my/eshell--find-by-dir dir))))
+         (let ((buf (and (not new) (my/eshell--find-related dir))))
            (if buf
 		       (switch-to-buffer buf)
              (my/eshell--new-in-dir dir)))
@@ -1450,6 +1604,11 @@ With prefix argument NEW, always create a new eshell buffer."
     (interactive "P")
     (my/eshell--open-in-tab (my/eshell--project-dir) new))
 
+  (defun my/enable-eat-eshell-mode ()
+    "Enable Eat's global Eshell integration without toggling it off.
+This is safe to run from every `eshell-mode-hook', including remote Eshells."
+    (eat-eshell-mode 1))
+
   (defun my/eshell-history-fuzzy ()
     (interactive)
     (require 'em-hist)
@@ -1469,7 +1628,11 @@ With prefix argument NEW, always create a new eshell buffer."
   (use-package eat
     :ensure t
     :commands (eat eat-eshell-mode)
-    :hook (eshell-mode . eat-eshell-mode)
+    :hook (eshell-mode . my/enable-eat-eshell-mode)
+    :custom
+    ;; Do not prompt while starting a remote command on a host without `stty';
+    ;; fall back to ordinary Eshell process handling there instead.
+    (eat-eshell-fallback-if-stty-not-available t)
     :config
     ;; Eat's Eshell keymaps can take precedence and pass C-c digits through to
     ;; the terminal.  Bind tab switching there explicitly too.
@@ -1479,7 +1642,10 @@ With prefix argument NEW, always create a new eshell buffer."
     (dolist (map (list eat-eshell-emacs-mode-map
 			           eat-eshell-semi-char-mode-map))
 	  (keymap-set map "C-M-i" #'tab-bar-switch-to-prev-tab)
-	  (keymap-set map "C-M-<tab>" #'tab-bar-switch-to-prev-tab)))
+	  (keymap-set map "C-M-<tab>" #'tab-bar-switch-to-prev-tab)
+	  (keymap-set map "C-M-o" #'tab-bar-switch-to-next-tab)
+	  (keymap-set map "C-M-S-i" #'tab-bar-move-tab-backward)
+	  (keymap-set map "C-M-S-o" #'tab-bar-move-tab)))
 
   (use-package bash-completion
     :ensure t
@@ -1673,17 +1839,42 @@ With prefix argument NEW, always create a new eshell buffer."
 
 ;; Tree-sitter
 (setq treesit-language-source-alist
-	  '((elisp "https://github.com/Wilfred/tree-sitter-elisp")
-        (svelte "https://github.com/tree-sitter-grammars/tree-sitter-svelte")))
+      '((bash "https://github.com/tree-sitter/tree-sitter-bash")
+        (c "https://github.com/tree-sitter/tree-sitter-c")
+        (cpp "https://github.com/tree-sitter/tree-sitter-cpp" "v0.22.0")
+        (css "https://github.com/tree-sitter/tree-sitter-css")
+        (dockerfile "https://github.com/camdencheek/tree-sitter-dockerfile")
+        (elisp "https://github.com/Wilfred/tree-sitter-elisp")
+        (go "https://github.com/tree-sitter/tree-sitter-go")
+        (gomod "https://github.com/camdencheek/tree-sitter-go-mod")
+        (html "https://github.com/tree-sitter/tree-sitter-html")
+        (java "https://github.com/tree-sitter/tree-sitter-java")
+        (javascript "https://github.com/tree-sitter/tree-sitter-javascript")
+        (json "https://github.com/tree-sitter/tree-sitter-json")
+        (lua "https://github.com/tree-sitter-grammars/tree-sitter-lua")
+        (markdown "https://github.com/tree-sitter-grammars/tree-sitter-markdown"
+                  nil "tree-sitter-markdown/src")
+        (python "https://github.com/tree-sitter/tree-sitter-python")
+        (ruby "https://github.com/tree-sitter/tree-sitter-ruby")
+        (rust "https://github.com/tree-sitter/tree-sitter-rust")
+        (svelte "https://github.com/tree-sitter-grammars/tree-sitter-svelte")
+        (toml "https://github.com/tree-sitter-grammars/tree-sitter-toml")
+        (tsx "https://github.com/tree-sitter/tree-sitter-typescript"
+             nil "tsx/src")
+        (typescript "https://github.com/tree-sitter/tree-sitter-typescript"
+                    nil "typescript/src")
+        (yaml "https://github.com/tree-sitter-grammars/tree-sitter-yaml")))
 
 (defun my/install-missing-treesit-grammars ()
   "Install Tree-sitter grammars used by this configuration when missing."
   (interactive)
   (unless (fboundp 'treesit-install-language-grammar)
     (user-error "Tree-sitter grammar installation is not available"))
-  (dolist (language '(svelte))
+  (dolist (language '(bash c cpp css dockerfile elisp go gomod html java
+                           javascript json lua markdown python ruby rust svelte toml
+                           tsx typescript yaml))
     (unless (treesit-language-available-p language)
-	  (treesit-install-language-grammar language))))
+      (treesit-install-language-grammar language))))
 
 (use-package treesit-auto
   :ensure t
@@ -1835,7 +2026,10 @@ With prefix argument NEW, always create a new eshell buffer."
 
 (use-package emmet-mode
   :ensure t
-  :hook ((html-mode css-mode sgml-mode web-mode js-jsx-mode tsx-ts-mode svelte-ts-mode) . emmet-mode))
+  :hook ((html-mode css-mode sgml-mode web-mode js-jsx-mode tsx-ts-mode svelte-ts-mode) . emmet-mode)
+  :bind (:map emmet-mode-keymap
+              ("C-<return>" . nil)
+              ("C-j" . emmet-expand-yas)))
 
 ;; Docker
 (use-package docker
@@ -1845,6 +2039,8 @@ With prefix argument NEW, always create a new eshell buffer."
 ;;; AI tools
 (use-package copilot
   :ensure t
+  :custom
+  (copilot-max-char 200000)
   :bind (("C-c A" . copilot-mode)
          :map copilot-completion-map
          ("<tab>" . copilot-accept-completion)
@@ -1922,27 +2118,64 @@ opened without hiding or toggling the pi buffer."
 
 ;;; Zen mode
 
-(use-package olivetti
+;; (use-package olivetti
+;;   :ensure t
+;;   :demand t
+;;   :bind
+;;   ("C-c z" . olivetti-mode)
+;;   :custom
+;;   (olivetti-body-width 120)
+;;   (olivetti-minimum-body-width 80)
+;;   (olivetti-style nil)
+;;   :hook
+;;   (olivetti-mode . (lambda () (visual-line-mode 1)))
+;;   :config
+;;   (defun my/turn-on-olivetti ()
+;;     (unless (or (minibufferp)
+;;                 (derived-mode-p 'special-mode 'dired-mode))
+;; 	  (olivetti-mode 1)))
+
+;;   (define-globalized-minor-mode global-olivetti-mode
+;;     olivetti-mode
+;;     my/turn-on-olivetti)
+
+;;   (global-olivetti-mode 1))
+
+(defun my/visual-fill-column-width ()
+  "Return the Visual Fill Column width for the current major mode."
+  (cond
+   ((derived-mode-p 'prog-mode) 120)
+   ((derived-mode-p 'text-mode) 100)
+   (t 100)))
+
+(defun my/visual-fill-column-enable ()
+  "Enable Visual Fill Column using the width for the current major mode."
+  (setq-local visual-fill-column-width
+              (my/visual-fill-column-width))
+  (visual-fill-column-mode 1))
+
+(defun my/visual-fill-column-toggle ()
+  "Toggle Visual Fill Column mode in the current buffer.
+
+When enabling it, automatically select a width based on the current
+major mode."
+  (interactive)
+  (if visual-fill-column-mode
+      (visual-fill-column-mode -1)
+    (my/visual-fill-column-enable)))
+
+(use-package visual-fill-column
   :ensure t
   :demand t
-  :bind
-  ("C-c z" . olivetti-mode)
-  :custom
-  (olivetti-body-width 120)
-  (olivetti-minimum-body-width 80)
+
   :hook
-  (olivetti-mode . (lambda () (visual-line-mode 1)))
-  :config
-  (defun my/turn-on-olivetti ()
-    (unless (or (minibufferp)
-                (derived-mode-p 'special-mode 'dired-mode))
-	  (olivetti-mode 1)))
+  ((prog-mode text-mode) . my/visual-fill-column-enable)
 
-  (define-globalized-minor-mode global-olivetti-mode
-    olivetti-mode
-    my/turn-on-olivetti)
+  :bind
+  ("C-c z" . my/visual-fill-column-toggle)
 
-  (global-olivetti-mode 1))
+  :custom
+  (visual-fill-column-center-text t))
 
 ;;; Files and Dired
 (use-package dired
@@ -1952,6 +2185,7 @@ opened without hiding or toggling the pi buffer."
   :custom
   (dired-omit-files (rx string-start (or "." "..") string-end))
   (dired-isearch-filenames 'dwim)
+  (dired-dwim-target t)
   (dired-create-destination-dirs 'always)
   (dired-create-destination-dirs-on-trailing-dirsep t)
   (confirm-nonexistent-file-or-buffer nil)
@@ -1998,10 +2232,16 @@ opened without hiding or toggling the pi buffer."
 	  (when (derived-mode-p 'dired-mode)
         (revert-buffer))
 	  (message "Saved clipboard image to %s" file)))
+  (defun my/dired-insert-or-kill-subdir (&optional kill)
+    "Insert the subdirectory at point, or remove it with prefix argument KILL."
+    (interactive "P")
+    (if kill
+        (call-interactively #'dired-kill-subdir)
+      (call-interactively #'dired-maybe-insert-subdir)))
   :bind (:map dired-mode-map
 		      ("h" . dired-up-directory)
 		      ("l" . dired-find-file)
-		      ("C-u i" . dired-kill-subdir)
+		      ("i" . my/dired-insert-or-kill-subdir)
 		      ("C-c C-y" . my/save-clipboard-image)))
 
 (use-package dired-clipboard
@@ -2041,12 +2281,12 @@ opened without hiding or toggling the pi buffer."
   :load-path "packages/project-frame-sessions"
   :custom
   (project-frame-sessions-frame-buffer-function #'my/frame-buffer-list)
-  (project-frame-sessions-tab-omit-function #'my/auto-close-tab-p)
+  (project-frame-sessions-ignored-buffer-name-regexp
+   "\\`\\*\\(?:vterm\\|magit\\).*\\*\\(?:<[0-9]+>\\)?\\'")
+  (project-frame-sessions-ignored-tab-name-regexp
+   "\\`\\(?:magit\\|vterm\\)\\(?:\\'\\|: \\)")
   (project-frame-sessions-post-restore-function #'my/update-frame-name)
   :config
-  (setq desktop-buffers-not-to-save
-        (concat "\\`\\*\\(?:vterm\\|eshell\\|magit\\|pi-coding-agent\\|pi-agent\\).*\\*\\(?:<[0-9]+>\\)?\\'"
-                (when desktop-buffers-not-to-save (concat "\\|" desktop-buffers-not-to-save))))
   (unless noninteractive (project-frame-sessions-mode 1))
   :bind
   ("C-x 5 S" . project-frame-sessions-save)
@@ -2054,14 +2294,39 @@ opened without hiding or toggling the pi buffer."
   ("C-x 5 C" . project-frame-sessions-restore-current-frame)
   ("C-x 5 D" . project-frame-sessions-delete))
 
+;;; Translate
+
+(use-package gt
+  :ensure t
+  :custom
+  (gt-langs '(en ru))
+  :config
+  (setq gt-default-translator
+        (gt-translator
+         :taker
+         (gt-taker
+          :langs '(en ru)
+          :text 'paragraph
+          :pick nil
+          :prompt nil)
+
+         :engines
+         (gt-google-engine)
+
+         :render
+         (gt-buffer-render)))
+
+  :bind
+  ("C-c t" . gt-translate))
+
 ;;; Org mode
 (use-package org-tempo
   :ensure nil)
 
-(use-package valign
-  :ensure t
-  :hook
-  (org-mode-hook . valign-mode))
+;; (use-package valign
+;;   :ensure t
+;;   :hook
+;;   (org-mode-hook . valign-mode))
 
 (use-package org-download
   :ensure t
@@ -2098,12 +2363,6 @@ opened without hiding or toggling the pi buffer."
   (org-mode . org-modern-mode)
   :init
   (add-hook 'org-agenda-finalize-hook #'org-modern-agenda))
-
-(use-package visual-fill-column
-  :ensure t
-  :custom
-  (visual-fill-column-width 80)
-  (visual-fill-column-center-text t))
 
 (defvar-local my/org-presentation--mode-line-local-p nil)
 (defvar-local my/org-presentation--mode-line-format nil)
@@ -2383,9 +2642,9 @@ point on the parent heading; Org then inserts the entry as a child."
     (my/org-mermaid-preview-clear)
     (org-with-wide-buffer
      (org-element-map (org-element-parse-buffer) 'src-block
-	                  (lambda (element)
-                        (when (string= (org-element-property :language element) "mermaid")
-                          (my/org-mermaid-preview--render-block element))))))
+	   (lambda (element)
+         (when (string= (org-element-property :language element) "mermaid")
+           (my/org-mermaid-preview--render-block element))))))
 
   (defvar-local my/org-mermaid-preview-timer nil
     "Idle timer used to debounce automatic Mermaid preview rendering.")
@@ -2439,6 +2698,7 @@ point on the parent heading; Org then inserts the entry as a child."
 
   (org-startup-indented t)
   (org-hide-emphasis-markers t)
+  (org-hide-leading-stars t)
   (org-pretty-entities t)
   (org-ellipsis " ▾")
   (org-return-follows-link t)
@@ -2464,7 +2724,7 @@ point on the parent heading; Org then inserts the entry as a child."
 
   (org-default-notes-file (expand-file-name "inbox.org" org-directory))
   (org-todo-keywords
-   '((sequence "TODO(t)" "|" "DONE(d!)" "CANCELLED(c@)")))
+   '((sequence "TODO(t)" "IN PROGRESS(p!)" "|" "DONE(d!)" "CANCELLED(c@)")))
   (org-refile-targets `((org-agenda-files :maxlevel . 3)
                         (,(my/org-todo-file) :maxlevel . 3)))
   (org-outline-path-complete-in-steps nil)
@@ -2484,6 +2744,19 @@ point on the parent heading; Org then inserts the entry as a child."
   (ob-mermaid-cli-path "mmdc")
 
   :config
+  (set-face-attribute 'org-level-1 nil :height 1.5 :weight 'bold)
+  (set-face-attribute 'org-level-2 nil :height 1.3 :weight 'bold)
+  (set-face-attribute 'org-level-3 nil :height 1.15 :weight 'semi-bold)
+  (set-face-attribute 'org-level-4 nil :height 1.05)
+
+  (dolist (face '(org-block
+                  org-code
+                  org-table
+                  org-verbatim
+                  org-meta-line
+                  org-checkbox))
+    (set-face-attribute face nil :inherit 'fixed-pitch))
+
   (setq org-babel-default-header-args:mermaid
         '((:results . "file graphics silent") (:exports . "none")))
   (org-babel-do-load-languages
@@ -2509,12 +2782,26 @@ point on the parent heading; Org then inserts the entry as a child."
         ("C-c C-x C-m" . my/org-mermaid-preview-at-point)
         ("C-c C-x M" . my/org-mermaid-preview-buffer)))
 
+(use-package org-re-reveal
+  :ensure t
+  :after org) ; C-c C-e
+
 (use-package toc-org
   :ensure t
   :bind
   ("C-c i t" . toc-org-insert-toc))
 
+(use-package markdown-ts-mode
+  :ensure t
+  :defer t)
+
 ;;; LSP and language modes
+
+;; Emacs' default file associations do not cover the modern Node/TypeScript
+;; module extensions.  These modes share the same parsers as .js and .ts.
+(dolist (entry '(("\\.\\(?:cjs\\|mjs\\)\\'" . js-ts-mode)
+                 ("\\.\\(?:cts\\|mts\\)\\'" . typescript-ts-mode)))
+  (add-to-list 'auto-mode-alist entry))
 
 (use-package mason
   :ensure t
@@ -2525,6 +2812,62 @@ point on the parent heading; Org then inserts the entry as a child."
 (use-package eglot
   :ensure nil
   :defer t
+  :preface
+  (defconst my/mason-typescript-svelte-plugin-directory
+    (expand-file-name
+     "mason/packages/svelte-language-server/lib/node_modules/typescript-svelte-plugin"
+     user-emacs-directory)
+    "Mason's bundled TypeScript plugin for resolving Svelte imports.")
+
+  (defun my/typescript-svelte-plugin-location ()
+    "Return a node_modules directory containing typescript-svelte-plugin.
+Prefer the project's plugin so its version matches the project, then fall back
+on the copy bundled with Mason's Svelte language server."
+    (let* ((project-root
+            (locate-dominating-file
+             default-directory
+             (lambda (directory)
+               (file-directory-p
+                (expand-file-name
+                 "node_modules/typescript-svelte-plugin" directory)))))
+           (project-node-modules
+            (and project-root (expand-file-name "node_modules" project-root)))
+           (mason-node-modules
+            (file-name-directory
+             (directory-file-name
+              my/mason-typescript-svelte-plugin-directory))))
+      (cond
+       (project-node-modules project-node-modules)
+       ((file-directory-p my/mason-typescript-svelte-plugin-directory)
+        mason-node-modules))))
+
+  (defun my/eglot-workspace-configuration (_server)
+    "Return shared Eglot settings for TypeScript, Svelte, and Python servers."
+    (let* ((svelte-plugin-location
+            (my/typescript-svelte-plugin-location))
+           (vtsls-settings
+            `(:autoUseWorkspaceTsdk t
+                                    :tsserver
+                                    (:globalPlugins
+                                     ,(if svelte-plugin-location
+                                          (vector
+                                           (list :name "typescript-svelte-plugin"
+                                                 ;; vtsls expects the directory from which the package
+                                                 ;; name can be resolved, not the package directory itself.
+                                                 :location svelte-plugin-location
+                                                 :enableForWorkspaceTypeScriptVersions t))
+                                        []))))
+           (typescript-settings
+            '(:tsserver (:experimental (:enableProjectDiagnostics t))))
+           (configuration
+            (list :vtsls vtsls-settings
+                  :ty '(:diagnosticMode "workspace")
+                  :typescript typescript-settings
+                  :javascript typescript-settings)))
+      ;; vtsls asks for workspace/configuration section "" during startup.
+      ;; The keyword `:' is Eglot's valid plist representation of that empty
+      ;; section; a literal string key makes JSON encoding fail on Emacs 32.
+      (append (list : configuration) configuration)))
   :hook
   ((python-ts-mode
     js-ts-mode
@@ -2535,13 +2878,10 @@ point on the parent heading; Org then inserts the entry as a child."
    . eglot-ensure)
   :custom
   (eglot-events-buffer-size 0)
+  (eglot-autoshutdown t)
   :config
   (setq-default eglot-workspace-configuration
-                '(:ty (:diagnosticMode "workspace")
-			          "" (:typescript (:tsserver (:experimental (:enableProjectDiagnostics t)))
-					                  :javascript (:tsserver (:experimental (:enableProjectDiagnostics t))))
-			          :typescript (:tsserver (:experimental (:enableProjectDiagnostics t)))
-			          :javascript (:tsserver (:experimental (:enableProjectDiagnostics t)))))
+                #'my/eglot-workspace-configuration)
 
   (cl-defmethod eglot-client-capabilities :around ((server eglot-lsp-server))
     "Advertise generic workspace diagnostic support to LSP servers."
@@ -2716,14 +3056,14 @@ view."
             :rev :newest
             :branch "main")
   :ensure t
+  :custom
+  (svelte-ts-mode-indent-offset 4)
+  :hook
+  (svelte-ts-mode . my/editorconfig-svelte-indent-offsets)
   :bind (:map svelte-ts-mode-map
 		      ("C-c C-n" . flymake-goto-next-error)
 		      ("C-c C-p" . flymake-goto-prev-error))
   :mode "\\.svelte\\'")
-
-(use-package markdown-ts-mode
-  :ensure t
-  :defer t)
 
 ;;; RSS and miscellaneous packages
 
@@ -2737,31 +3077,7 @@ view."
      ("https://emacs.stackexchange.com/feeds" emacs q-and-a)
      ("https://protesilaos.com/codelog.xml" emacs linux)
      ("https://irreal.org/blog/?feed=rss2" emacs)
-     ("https://sachachua.com/blog/feed/" emacs org)
-
-     ;; Developer experience / platform engineering
-     ("https://newsletter.pragmaticengineer.com/feed" dx management)
-     ("https://platformweekly.com/feed" dx platform)
-     ("https://platformengineering.org/blog/rss.xml" dx platform)
-     ("https://cloud.google.com/blog/products/devops-sre/rss" dora devops)
-     ("https://humanitec.com/blog/rss.xml" dx platform)
-     ("https://leaddev.com/rss.xml" dx management)
-     ("https://martinfowler.com/feed.atom" architecture)
-
-     ;; LLMs / AI research
-     ("https://openai.com/news/rss.xml" ai openai llm)
-     ("https://huggingface.co/blog/feed.xml" ai huggingface llm ml)
-     ("https://simonwillison.net/atom/everything/" ai llm tools)
-     ("https://rss.arxiv.org/rss/cs.CL" ai research nlp llm)
-     ("https://hnrss.org/newest?q=LLM+OR+language+model+OR+agent+OR+inference"
-	  ai llm news)
-
-     ;; Programming / systems
-     ("https://news.ycombinator.com/rss" programming news)
-     ("https://lobste.rs/rss" programming systems)
-     ("https://jvns.ca/atom.xml" programming linux systems)
-     ("https://danluu.com/atom.xml" programming systems longform)
-     ("https://lwn.net/headlines/rss" linux kernel opensource))))
+     ("https://sachachua.com/blog/feed/" emacs org))))
 
 (use-package remoto
   :vc (:url "https://github.com/agzam/remoto.el"

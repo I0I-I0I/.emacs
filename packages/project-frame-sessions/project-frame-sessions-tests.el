@@ -20,11 +20,17 @@
   `(let* ((frame (selected-frame))
           (old-id (frame-parameter frame project-frame-sessions--id-parameter))
           (old-deleted (frame-parameter frame project-frame-sessions--deleted-parameter))
+          (old-excluded
+           (frame-parameter frame
+                            project-frame-sessions--excluded-buffers-parameter))
           (old-root (frame-parameter frame 'project-frame-sessions-root))
           (old-directory (frame-parameter frame 'default-directory)))
      (unwind-protect (progn ,@body)
        (set-frame-parameter frame project-frame-sessions--id-parameter old-id)
        (set-frame-parameter frame project-frame-sessions--deleted-parameter old-deleted)
+       (set-frame-parameter frame
+                            project-frame-sessions--excluded-buffers-parameter
+                            old-excluded)
        (set-frame-parameter frame 'project-frame-sessions-root old-root)
        (set-frame-parameter frame 'default-directory old-directory))))
 
@@ -46,6 +52,9 @@
 (defun project-frame-sessions-tests--fake-desktop-save (stage &rest _)
   (with-temp-file (expand-file-name project-frame-sessions--desktop-name stage)
     (insert "snapshot")))
+
+(ert-deftest project-frame-sessions-buffer-killing-is-disabled-by-default ()
+  (should-not (default-value 'project-frame-sessions-kill-buffers-on-switch)))
 
 (ert-deftest project-frame-sessions-new-ids-are-stable-shaped-and-unique ()
   (let ((a (project-frame-sessions--new-id))
@@ -240,6 +249,20 @@
       (kill-buffer wanted)
       (kill-buffer other))))
 
+(ert-deftest project-frame-sessions-buffer-predicate-honors-ignored-name-regexp ()
+  (let ((wanted (generate-new-buffer "pfs-wanted"))
+        (ignored (generate-new-buffer "pfs-ignored")))
+    (unwind-protect
+        (let* ((project-frame-sessions-ignored-buffer-name-regexp
+                "\\`pfs-ignored\\'")
+               (predicate (project-frame-sessions--buffer-save-predicate
+                           (list wanted ignored) nil)))
+          (should (funcall predicate nil (buffer-name wanted) 'fundamental-mode))
+          (should-not
+           (funcall predicate nil (buffer-name ignored) 'fundamental-mode)))
+      (kill-buffer wanted)
+      (kill-buffer ignored))))
+
 (ert-deftest project-frame-sessions-tab-buffers-include-hidden-tabspaces-associations ()
   (let ((current (generate-new-buffer " pfs-current"))
         (hidden (generate-new-buffer " pfs-hidden"))
@@ -251,7 +274,9 @@
                        ('tabs `((current-tab (name . "One"))
                                 (tab (name . "Two") (wc-bl . (,hidden))
                                      (ws (tabspaces--buffer-list (,workspace))))))
-                       (_ nil)))))
+                       (_ nil))))
+                  ((symbol-function 'set-frame-parameter) #'ignore)
+                  ((symbol-function 'window-list) (lambda (&rest _) nil)))
           (let ((project-frame-sessions-frame-buffer-function
                  (lambda (_) (list current))))
             (let ((buffers (project-frame-sessions--tab-buffers 'frame)))
@@ -260,9 +285,93 @@
               (should (memq workspace buffers)))))
       (mapc #'kill-buffer (list current hidden workspace)))))
 
+(ert-deftest project-frame-sessions-tab-buffers-keep-retained-buffers-excluded-until-reused ()
+  (let ((retained (generate-new-buffer " pfs-retained"))
+        (current (generate-new-buffer " pfs-current"))
+        (excluded nil)
+        active)
+    (unwind-protect
+        (progn
+          (setq excluded (list retained))
+          (cl-letf (((symbol-function 'project-frame-sessions--active-workspace-buffers)
+                     (lambda (_) active))
+                    ((symbol-function 'project-frame-sessions--tab-parameter-buffers)
+                     (lambda (_) nil))
+                    ((symbol-function 'project-frame-sessions--excluded-buffers)
+                     (lambda (_) excluded))
+                    ((symbol-function 'project-frame-sessions--set-excluded-buffers)
+                     (lambda (_frame buffers) (setq excluded buffers))))
+            (let ((project-frame-sessions-frame-buffer-function
+                   (lambda (_) (list retained current))))
+              (should (equal (project-frame-sessions--tab-buffers 'frame)
+                             (list current)))
+              (setq active (list retained))
+              (should (memq retained
+                            (project-frame-sessions--tab-buffers 'frame)))
+              (should-not excluded))))
+      (mapc #'kill-buffer (list retained current)))))
+
+(ert-deftest project-frame-sessions-current-frame-switch-retains-and-excludes-by-default ()
+  (let ((outgoing (generate-new-buffer " pfs-outgoing"))
+        (reused (generate-new-buffer " pfs-reused"))
+        (prior (generate-new-buffer " pfs-prior"))
+        excluded)
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-frame-sessions--set-excluded-buffers)
+                   (lambda (_frame buffers) (setq excluded buffers))))
+          (let ((project-frame-sessions-kill-buffers-on-switch nil))
+            (project-frame-sessions--complete-current-frame-switch
+             'frame (list outgoing reused) (list prior) (list reused)))
+          (should (buffer-live-p outgoing))
+          (should (memq outgoing excluded))
+          (should (memq prior excluded))
+          (should-not (memq reused excluded)))
+      (mapc #'kill-buffer (list outgoing reused prior)))))
+
+(ert-deftest project-frame-sessions-current-frame-switch-kills-only-unshared-buffers ()
+  (let ((outgoing (generate-new-buffer " pfs-outgoing"))
+        (shared (generate-new-buffer " pfs-shared"))
+        (declined (generate-new-buffer " pfs-declined"))
+        excluded called)
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-frame-sessions--other-frame-buffers)
+                   (lambda (_) (list shared)))
+                  ((symbol-function 'project-frame-sessions--set-excluded-buffers)
+                   (lambda (_frame buffers) (setq excluded buffers)))
+                  ((symbol-function 'project-frame-sessions--kill-outgoing-buffer)
+                   (lambda (buffer)
+                     (push buffer called)
+                     (unless (eq buffer declined) (kill-buffer buffer)))))
+          (let ((project-frame-sessions-kill-buffers-on-switch t))
+            (project-frame-sessions--complete-current-frame-switch
+             'frame (list outgoing shared declined) nil nil))
+          (should-not (buffer-live-p outgoing))
+          (should (buffer-live-p shared))
+          (should (buffer-live-p declined))
+          (should-not (memq shared called))
+          (should (memq declined called))
+          (should (memq shared excluded))
+          (should (memq declined excluded)))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer) (kill-buffer buffer)))
+            (list outgoing shared declined)))))
+
+(ert-deftest project-frame-sessions-modified-outgoing-buffer-requires-confirmation ()
+  (let ((buffer (generate-new-buffer " pfs-modified")) prompted)
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer (set-buffer-modified-p t))
+          (cl-letf (((symbol-function 'kill-buffer--possibly-save)
+                     (lambda (candidate) (setq prompted candidate) nil)))
+            (project-frame-sessions--kill-outgoing-buffer buffer))
+          (should (eq prompted buffer))
+          (should (buffer-live-p buffer)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer)))))
+
 (ert-deftest project-frame-sessions-filter-tabs-keeps-one-current-tab ()
-  (let ((project-frame-sessions-tab-omit-function
-         (lambda (tab) (equal (alist-get 'name tab) "omit"))))
+  (let ((project-frame-sessions-ignored-tab-name-regexp "\\`omit\\'"))
     (let ((parameter (project-frame-sessions--filter-tabs
                       '(tabs (tab (name . "keep") (wc . unsafe))
                              (current-tab (name . "omit")))
@@ -385,6 +494,87 @@
       (should (eq (project-frame-sessions-restore) owner))
       (should (eq focused owner))
       (should-not made))))
+
+(ert-deftest project-frame-sessions-current-frame-restore-cleans-only-after-success ()
+  (project-frame-sessions-tests--preserve-frame
+    (let* ((frame (selected-frame))
+           (outgoing (generate-new-buffer " pfs-restore-outgoing"))
+           (prior (generate-new-buffer " pfs-restore-prior"))
+           (reused (generate-new-buffer " pfs-restore-reused"))
+           (destination (generate-new-buffer " pfs-restore-destination"))
+           completed)
+      (unwind-protect
+          (cl-letf (((symbol-function 'project-frame-sessions--find-live-frame)
+                     #'ignore)
+                    ((symbol-function 'frame-list) (lambda () (list frame)))
+                    ((symbol-function 'project-frame-sessions--tab-buffers)
+                     (lambda (_) (list outgoing reused)))
+                    ((symbol-function 'project-frame-sessions--excluded-buffers)
+                     (lambda (_) (list prior)))
+                    ((symbol-function 'frameset-save) (lambda (&rest _) 'rollback))
+                    ((symbol-function 'project-frame-sessions--frame-id) #'ignore)
+                    ((symbol-function 'project-frame-sessions--read-desktop-frameset)
+                     (lambda (&rest _)
+                       (setq project-frame-sessions--desktop-restored-buffers
+                             (list reused))
+                       'snapshot))
+                    ((symbol-function 'project-frame-sessions--prepare-restore-target)
+                     #'ignore)
+                    ((symbol-function 'project-frame-sessions--restore-frameset)
+                     #'ignore)
+                    ((symbol-function 'project-frame-sessions--active-workspace-buffers)
+                     (lambda (_) (list destination)))
+                    ((symbol-function
+                      'project-frame-sessions--complete-current-frame-switch)
+                     (lambda (&rest args) (setq completed args)))
+                    ((symbol-function 'select-frame-set-input-focus) #'ignore))
+            (project-frame-sessions--restore-entry
+             (project-frame-sessions-tests--entry) frame t)
+            (should (equal completed
+                           (list frame (list outgoing reused) (list prior)
+                                 (list reused destination)))))
+        (mapc #'kill-buffer (list outgoing prior reused destination))))))
+
+(ert-deftest project-frame-sessions-failed-current-frame-restore-does-not-clean-buffers ()
+  (project-frame-sessions-tests--preserve-frame
+    (let* ((frame (selected-frame))
+           (outgoing (generate-new-buffer " pfs-restore-outgoing"))
+           (restored (generate-new-buffer " pfs-restore-failed-new"))
+           completed exclusions)
+      (unwind-protect
+          (cl-letf (((symbol-function 'project-frame-sessions--find-live-frame)
+                     #'ignore)
+                    ((symbol-function 'frame-list) (lambda () (list frame)))
+                    ((symbol-function 'project-frame-sessions--tab-buffers)
+                     (lambda (_) (list outgoing)))
+                    ((symbol-function 'project-frame-sessions--excluded-buffers)
+                     (lambda (_) nil))
+                    ((symbol-function 'frameset-save) (lambda (&rest _) 'rollback))
+                    ((symbol-function 'project-frame-sessions--frame-id) #'ignore)
+                    ((symbol-function 'project-frame-sessions--read-desktop-frameset)
+                     (lambda (&rest _)
+                       (setq project-frame-sessions--desktop-restored-buffers
+                             (list restored))
+                       (error "restore failed")))
+                    ((symbol-function 'project-frame-sessions--prepare-restore-target)
+                     #'ignore)
+                    ((symbol-function 'project-frame-sessions--restore-frameset)
+                     #'ignore)
+                    ((symbol-function
+                      'project-frame-sessions--complete-current-frame-switch)
+                     (lambda (&rest _) (setq completed t)))
+                    ((symbol-function 'project-frame-sessions--set-excluded-buffers)
+                     (lambda (_ buffers) (setq exclusions buffers)))
+                    ((symbol-function 'select-frame-set-input-focus) #'ignore))
+            (should-error
+             (project-frame-sessions--restore-entry
+              (project-frame-sessions-tests--entry) frame t))
+            (should-not completed)
+            (should (equal exclusions (list restored)))
+            (should (buffer-live-p outgoing))
+            (should (buffer-live-p restored)))
+        (dolist (buffer (list outgoing restored))
+          (when (buffer-live-p buffer) (kill-buffer buffer)))))))
 
 (ert-deftest project-frame-sessions-new-frame-is-deleted-after-restore-failure ()
   (let ((fresh 'fresh) deleted)
@@ -873,6 +1063,78 @@
           (should-not (project-frame-sessions--unsaved-projects (list entry))))
       (ignore-errors (delete-directory root t)))))
 
+(ert-deftest project-frame-sessions-current-frame-project-excludes-outgoing-from-first-save ()
+  (project-frame-sessions-tests--preserve-frame
+    (let* ((frame (selected-frame))
+           (outgoing (generate-new-buffer " pfs-project-outgoing"))
+           (prior (generate-new-buffer " pfs-project-prior"))
+           (destination (generate-new-buffer " pfs-project-destination"))
+           saved-id save-exclusions completed)
+      (unwind-protect
+          (progn
+            (set-frame-parameter frame project-frame-sessions--id-parameter "old")
+            (set-frame-parameter
+             frame project-frame-sessions--excluded-buffers-parameter (list prior))
+            (cl-letf (((symbol-function 'project-frame-sessions--tab-buffers)
+                       (lambda (_) (list outgoing)))
+                      ((symbol-function 'project-frame-sessions--active-workspace-buffers)
+                       (lambda (_) (list destination)))
+                      ((symbol-function 'dired) #'ignore)
+                      ((symbol-function 'project-frame-sessions--save-frame-internal)
+                       (lambda (candidate &rest _)
+                         (setq saved-id
+                               (frame-parameter
+                                candidate project-frame-sessions--id-parameter)
+                               save-exclusions
+                               project-frame-sessions--save-buffer-exclusions)
+                         (set-frame-parameter
+                          candidate project-frame-sessions--id-parameter "new")))
+                      ((symbol-function
+                        'project-frame-sessions--complete-current-frame-switch)
+                       (lambda (&rest args) (setq completed args)))
+                      ((symbol-function 'select-frame-set-input-focus) #'ignore))
+              (project-frame-sessions--enroll-project
+               frame '(:type project :root "/tmp/" :name "Tmp") t))
+            (should-not saved-id)
+            (should (memq outgoing save-exclusions))
+            (should (memq prior save-exclusions))
+            (should-not (memq destination save-exclusions))
+            (should (equal completed
+                           (list frame (list outgoing) (list prior)
+                                 (list destination)))))
+        (mapc #'kill-buffer (list outgoing prior destination))))))
+
+(ert-deftest project-frame-sessions-failed-current-frame-project-switch-does-not-clean-buffers ()
+  (project-frame-sessions-tests--preserve-frame
+    (let* ((frame (selected-frame))
+           (outgoing (generate-new-buffer " pfs-project-outgoing"))
+           (prior (generate-new-buffer " pfs-project-prior"))
+           completed)
+      (unwind-protect
+          (progn
+            (set-frame-parameter
+             frame project-frame-sessions--excluded-buffers-parameter (list prior))
+            (cl-letf (((symbol-function 'project-frame-sessions--tab-buffers)
+                       (lambda (_) (list outgoing)))
+                      ((symbol-function 'project-frame-sessions--active-workspace-buffers)
+                       (lambda (_) nil))
+                      ((symbol-function 'dired) #'ignore)
+                      ((symbol-function 'project-frame-sessions--save-frame-internal)
+                       (lambda (&rest _) (error "save failed")))
+                      ((symbol-function
+                        'project-frame-sessions--complete-current-frame-switch)
+                       (lambda (&rest _) (setq completed t))))
+              (should-error
+               (project-frame-sessions--enroll-project
+                frame '(:type project :root "/tmp/" :name "Tmp") t)))
+            (should-not completed)
+            (should (buffer-live-p outgoing))
+            (should (equal
+                     (frame-parameter
+                      frame project-frame-sessions--excluded-buffers-parameter)
+                     (list prior))))
+        (mapc #'kill-buffer (list outgoing prior))))))
+
 (ert-deftest project-frame-sessions-project-route-leaves-new-frame-on-failure ()
   (let ((fresh 'fresh) deleted made)
     (cl-letf (((symbol-function 'project-frame-sessions--select-restore-candidate)
@@ -886,6 +1148,348 @@
       (should-error (project-frame-sessions-restore))
       (should made)
       (should-not deleted))))
+
+(ert-deftest project-frame-sessions-frame-close-preservation-is-enabled-by-default ()
+  (should (default-value
+           'project-frame-sessions-preserve-buffers-after-frame-close)))
+
+(ert-deftest project-frame-sessions-frame-close-cleanup-honors-policy-and-sharing ()
+  (let ((private (generate-new-buffer " pfs-close-private"))
+        (shared (generate-new-buffer " pfs-close-shared"))
+        (adopted (generate-new-buffer " pfs-close-adopted"))
+        (project-frame-sessions-preserve-buffers-after-frame-close t)
+        other-frame-buffers)
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-frame-sessions--other-frame-buffers)
+                   (lambda (_) other-frame-buffers)))
+          (project-frame-sessions--dispose-closed-frame-buffers
+           (list private shared adopted))
+          (should (cl-every #'buffer-live-p (list private shared adopted)))
+          (setq project-frame-sessions-preserve-buffers-after-frame-close nil
+                other-frame-buffers (list shared adopted))
+          (project-frame-sessions--dispose-closed-frame-buffers
+           (list private shared adopted))
+          (should-not (buffer-live-p private))
+          (should (buffer-live-p shared))
+          (should (buffer-live-p adopted)))
+      (mapc (lambda (buffer)
+              (when (buffer-live-p buffer) (kill-buffer buffer)))
+            (list private shared adopted)))))
+
+(ert-deftest project-frame-sessions-frame-close-cleanup-continues-after-refusal ()
+  (let ((declined (generate-new-buffer " pfs-close-declined"))
+        (private (generate-new-buffer " pfs-close-next"))
+        (project-frame-sessions-preserve-buffers-after-frame-close nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-frame-sessions--other-frame-buffers)
+                   (lambda (_) nil))
+                  ((symbol-function 'project-frame-sessions--kill-outgoing-buffer)
+                   (lambda (buffer)
+                     (if (eq buffer declined) (signal 'quit nil)
+                       (kill-buffer buffer)))))
+          (project-frame-sessions--dispose-closed-frame-buffers
+           (list declined private))
+          (should (buffer-live-p declined))
+          (should-not (buffer-live-p private)))
+      (when (buffer-live-p declined) (kill-buffer declined))
+      (when (buffer-live-p private) (kill-buffer private)))))
+
+(ert-deftest project-frame-sessions-delete-frame-cleans-once-only-after-deletion ()
+  (let ((project-frame-sessions-preserve-buffers-after-frame-close nil)
+        (live t) cleaned scheduled)
+    (cl-letf (((symbol-function 'project-frame-sessions--frame-id) (lambda (_) "id"))
+              ((symbol-function 'project-frame-sessions--save-frame-internal)
+               (lambda (&rest _) t))
+              ((symbol-function 'project-frame-sessions--frame-close-candidates)
+               (lambda (_) '(one two)))
+              ((symbol-function 'delete-frame) (lambda (&rest _) (setq live nil)))
+              ((symbol-function 'frame-live-p) (lambda (_) live))
+              ((symbol-function 'project-frame-sessions--dispose-closed-frame-buffers)
+               (lambda (buffers) (push buffers cleaned)))
+              ((symbol-function 'run-at-time)
+               (lambda (&rest args) (push args scheduled))))
+      (project-frame-sessions-delete-frame 'frame)
+      (should (equal cleaned '((one two))))
+      (should-not scheduled))))
+
+(ert-deftest project-frame-sessions-delete-frame-failed-deletion-preserves-buffers ()
+  (let ((project-frame-sessions-preserve-buffers-after-frame-close nil) cleaned)
+    (cl-letf (((symbol-function 'project-frame-sessions--frame-id) (lambda (_) "id"))
+              ((symbol-function 'project-frame-sessions--save-frame-internal)
+               (lambda (&rest _) t))
+              ((symbol-function 'project-frame-sessions--frame-close-candidates)
+               (lambda (_) '(buffer)))
+              ((symbol-function 'delete-frame) (lambda (&rest _) (error "veto")))
+              ((symbol-function 'project-frame-sessions--dispose-closed-frame-buffers)
+               (lambda (&rest _) (setq cleaned t))))
+      (should-error (project-frame-sessions-delete-frame 'frame))
+      (should-not cleaned))))
+
+(ert-deftest project-frame-sessions-delete-hook-defers-and-rechecks-deletion ()
+  (let ((project-frame-sessions-mode t)
+        (project-frame-sessions-preserve-buffers-after-frame-close nil)
+        (project-frame-sessions--pending-frame-closes
+         (make-hash-table :test #'eq))
+        scheduled finalized)
+    (cl-letf (((symbol-function 'project-frame-sessions--frame-id) (lambda (_) "id"))
+              ((symbol-function 'project-frame-sessions--save-frame-internal)
+               (lambda (&rest _) t))
+              ((symbol-function 'project-frame-sessions--frame-close-candidates)
+               (lambda (_) '(buffer)))
+              ((symbol-function 'run-at-time)
+               (lambda (_delay _repeat function &rest args)
+                 (setq scheduled (cons function args))))
+              ((symbol-function 'project-frame-sessions--dispose-closed-frame-buffers)
+               (lambda (_) (setq finalized t)))
+              ((symbol-function 'frame-live-p) (lambda (_) t)))
+      (project-frame-sessions--delete-frame-hook 'frame)
+      (should (gethash 'frame project-frame-sessions--pending-frame-closes))
+      (apply (car scheduled) (cdr scheduled))
+      (should-not finalized)
+      (should-not (gethash 'frame project-frame-sessions--pending-frame-closes))
+      (cl-letf (((symbol-function 'frame-live-p) (lambda (_) nil)))
+        (apply (car scheduled) (cdr scheduled)))
+      (should finalized))))
+
+(ert-deftest project-frame-sessions-delete-hook-coalesces-recursive-calls ()
+  (let ((project-frame-sessions-mode t)
+        (project-frame-sessions-preserve-buffers-after-frame-close t)
+        (project-frame-sessions--pending-frame-closes
+         (make-hash-table :test #'eq))
+        (saves 0) scheduled)
+    (cl-letf (((symbol-function 'project-frame-sessions--frame-id) (lambda (_) "id"))
+              ((symbol-function 'project-frame-sessions--save-frame-internal)
+               (lambda (&rest _)
+                 (cl-incf saves)
+                 (project-frame-sessions--delete-frame-hook 'frame)))
+              ((symbol-function 'run-at-time)
+               (lambda (_delay _repeat function &rest args)
+                 (push (cons function args) scheduled))))
+      (project-frame-sessions--delete-frame-hook 'frame)
+      (should (= saves 1))
+      (should (= (length scheduled) 1))
+      (cl-letf (((symbol-function 'frame-live-p) (lambda (_) t)))
+        (apply (caar scheduled) (cdar scheduled)))
+      (project-frame-sessions--delete-frame-hook 'frame)
+      (should (= saves 2))
+      (should (= (length scheduled) 2)))))
+
+(ert-deftest project-frame-sessions-pi-metadata-resolves-input-through-chat ()
+  (let ((chat (generate-new-buffer " pfs-pi-chat"))
+        (input (generate-new-buffer " pfs-pi-input"))
+        (session "/tmp/pfs-session.jsonl"))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (setq major-mode 'pi-coding-agent-chat-mode)
+            (setq-local pi-coding-agent--state (list :session-file session))
+            (setq default-directory "/tmp/"))
+          (with-current-buffer input
+            (setq major-mode 'pi-coding-agent-input-mode)
+            (setq-local pi-coding-agent--chat-buffer chat)
+            (let ((data (project-frame-sessions--pi-save-data nil)))
+              (should (eq (plist-get data :role) 'input))
+              (should (equal (plist-get data :session-file) session))
+              (should (equal (plist-get data :directory) "/tmp/")))))
+      (mapc #'kill-buffer (list chat input)))))
+
+(ert-deftest project-frame-sessions-pi-metadata-without-session-file-is-unrestorable ()
+  (let ((chat (generate-new-buffer " pfs-pi-no-session")))
+    (unwind-protect
+        (with-current-buffer chat
+          (setq major-mode 'pi-coding-agent-chat-mode)
+          (setq-local pi-coding-agent--state '(:model "test"))
+          (should-not (project-frame-sessions--pi-save-data nil)))
+      (kill-buffer chat))))
+
+(ert-deftest project-frame-sessions-pi-paired-restore-opens-exact-file-once ()
+  (let* ((session (make-temp-file "pfs-pi-" nil ".jsonl"))
+         (chat (generate-new-buffer " pfs-restored-chat"))
+         (input (generate-new-buffer " pfs-restored-input"))
+         (project-frame-sessions--utility-restore-cache
+          (make-hash-table :test #'equal))
+         (calls 0)
+         (original-require (symbol-function 'require)))
+    (unwind-protect
+        (progn
+          (with-current-buffer chat
+            (setq-local pi-coding-agent--input-buffer input))
+          (cl-letf (((symbol-function 'require)
+                     (lambda (feature &optional filename noerror)
+                       (if (eq feature 'pi-coding-agent) t
+                         (funcall original-require feature filename noerror))))
+                    ((symbol-function 'pi-coding-agent--setup-session)
+                     (lambda (&rest _) chat))
+                    ((symbol-function 'pi-coding-agent-open-session-file)
+                     (lambda (file)
+                       (should (equal file session))
+                       (cl-incf calls)
+                       chat)))
+            (let ((chat-data (list :project-frame-sessions 1 :kind 'pi
+                                   :role 'chat :session-file session))
+                  (input-data (list :project-frame-sessions 1 :kind 'pi
+                                    :role 'input :session-file session)))
+              (should (eq (project-frame-sessions--restore-pi-buffer
+                           nil "chat" chat-data) chat))
+              (should (eq (project-frame-sessions--restore-pi-buffer
+                           nil "input" input-data) input))
+              (should (= calls 1)))))
+      (mapc (lambda (buffer) (when (buffer-live-p buffer) (kill-buffer buffer)))
+            (list chat input))
+      (delete-file session))))
+
+(ert-deftest project-frame-sessions-pi-restore-isolates-files-with-the-same-cwd ()
+  (let* ((first-file (make-temp-file "pfs-pi-first-" nil ".jsonl"))
+         (second-file (make-temp-file "pfs-pi-second-" nil ".jsonl"))
+         (project-frame-sessions--utility-restore-cache
+          (make-hash-table :test #'equal))
+         (buffers (make-hash-table :test #'equal))
+         identities
+         (original-require (symbol-function 'require)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'require)
+                   (lambda (feature &optional filename noerror)
+                     (if (eq feature 'pi-coding-agent) t
+                       (funcall original-require feature filename noerror))))
+                  ((symbol-function 'pi-coding-agent--setup-session)
+                   (lambda (_directory &optional identity)
+                     (push identity identities)
+                     (or (gethash identity buffers)
+                         (let ((chat (generate-new-buffer " pfs-isolated-chat")))
+                           (puthash identity chat buffers)
+                           chat))))
+                  ((symbol-function 'pi-coding-agent-open-session-file)
+                   (lambda (_file)
+                     (pi-coding-agent--setup-session "/same/project/"))))
+          (let* ((first-data
+                  (list :project-frame-sessions 1 :kind 'pi :role 'chat
+                        :session-file first-file))
+                 (second-data
+                  (list :project-frame-sessions 1 :kind 'pi :role 'chat
+                        :session-file second-file))
+                 (first
+                  (project-frame-sessions--restore-pi-buffer nil "first" first-data))
+                 (second
+                  (project-frame-sessions--restore-pi-buffer nil "second" second-data)))
+            (should (buffer-live-p first))
+            (should (buffer-live-p second))
+            (should-not (eq first second))
+            (should (= (length (cl-remove-duplicates identities :test #'equal)) 2))
+            (should (eq first
+                        (project-frame-sessions--restore-pi-buffer
+                         nil "first" first-data)))))
+      (maphash (lambda (_ buffer)
+                 (when (buffer-live-p buffer) (kill-buffer buffer)))
+               buffers)
+      (delete-file first-file)
+      (delete-file second-file))))
+
+(ert-deftest project-frame-sessions-pi-restore-tolerates-absent-package ()
+  (let ((session (make-temp-file "pfs-pi-absent-" nil ".jsonl"))
+        opened)
+    (unwind-protect
+        (cl-letf (((symbol-function 'require)
+                   (lambda (feature &rest _)
+                     (unless (eq feature 'pi-coding-agent) t)))
+                  ((symbol-function 'pi-coding-agent-open-session-file)
+                   (lambda (&rest _) (setq opened t))))
+          (should-not
+           (project-frame-sessions--restore-pi-buffer
+            nil "pi" (list :project-frame-sessions 1 :kind 'pi
+                           :role 'chat :session-file session)))
+          (should-not opened))
+      (delete-file session))))
+
+(ert-deftest project-frame-sessions-pi-restore-rejects-unavailable-paths ()
+  (dolist (file '("relative.jsonl" "/ssh:host:/tmp/session.jsonl"
+                  "/missing/pfs-session.jsonl"))
+    (should-not
+     (project-frame-sessions--restore-pi-buffer
+      nil "pi" (list :project-frame-sessions 1 :kind 'pi
+                     :role 'chat :session-file file)))))
+
+(ert-deftest project-frame-sessions-eshell-metadata-and-fresh-restore-round-trip ()
+  (let* ((directory (make-temp-file "pfs-eshell-" t))
+         (source (generate-new-buffer "*pfs-eshell-saved*"))
+         data restored hook-ran hook-function)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq major-mode 'eshell-mode
+                  default-directory (file-name-as-directory directory))
+            (setq data (project-frame-sessions--eshell-save-data nil)))
+          (require 'eshell)
+          (setq hook-function (lambda () (setq hook-ran t)))
+          (add-hook 'eshell-mode-hook hook-function)
+          (setq restored
+                (project-frame-sessions--restore-eshell-buffer
+                 nil (buffer-name source) data))
+          (should (buffer-live-p restored))
+          (with-current-buffer restored
+            (should (derived-mode-p 'eshell-mode))
+            (should (equal default-directory
+                           (file-name-as-directory directory))))
+          (should hook-ran))
+      (when hook-function (remove-hook 'eshell-mode-hook hook-function))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p restored) (kill-buffer restored))
+      (ignore-errors (delete-directory directory t)))))
+
+(ert-deftest project-frame-sessions-eshell-tramp-directory-round-trip-is-lazy ()
+  (let* ((directory "/ssh:test@example:/srv/project/")
+         (source (generate-new-buffer "*pfs-eshell-remote-saved*"))
+         data restored observed-directory)
+    (unwind-protect
+        (progn
+          (with-current-buffer source
+            (setq major-mode 'eshell-mode
+                  default-directory directory
+                  data (project-frame-sessions--eshell-save-data nil)))
+          (should (equal (plist-get data :directory) directory))
+          (cl-letf (((symbol-function 'file-directory-p)
+                     (lambda (_) (ert-fail "Tramp host contacted during restore")))
+                    ((symbol-function 'require) (lambda (&rest _) t))
+                    ((symbol-function 'eshell)
+                     (lambda (&optional _)
+                       (setq observed-directory default-directory)
+                       (generate-new-buffer "*pfs-eshell-remote-restored*"))))
+            (setq restored
+                  (project-frame-sessions--restore-eshell-buffer
+                   nil (buffer-name source) data)))
+          (should (buffer-live-p restored))
+          (should (equal observed-directory directory)))
+      (when (buffer-live-p source) (kill-buffer source))
+      (when (buffer-live-p restored) (kill-buffer restored)))))
+
+(ert-deftest project-frame-sessions-eshell-restore-keeps-same-directory-sessions-distinct ()
+  (let* ((directory (make-temp-file "pfs-eshell-many-" t))
+         (base (list :project-frame-sessions 1 :kind 'eshell
+                     :directory (file-name-as-directory directory)
+                     :buffer-name "*pfs-many*"))
+         first second)
+    (unwind-protect
+        (progn
+          (setq first (project-frame-sessions--restore-eshell-buffer
+                       nil "*pfs-many*" (append base '(:identity "one")))
+                second (project-frame-sessions--restore-eshell-buffer
+                        nil "*pfs-many*" (append base '(:identity "two"))))
+          (should (buffer-live-p first))
+          (should (buffer-live-p second))
+          (should-not (eq first second)))
+      (when (buffer-live-p first) (kill-buffer first))
+      (when (buffer-live-p second) (kill-buffer second))
+      (ignore-errors (delete-directory directory t)))))
+
+(ert-deftest project-frame-sessions-desktop-registrations-preserve-existing-handlers ()
+  (let* ((third-party (cons 'eshell-mode #'ignore))
+         (desktop-buffer-mode-handlers (list third-party))
+         (project-frame-sessions--desktop-handler-registrations nil))
+    (project-frame-sessions--register-desktop-handler
+     'eshell-mode #'project-frame-sessions--restore-eshell-buffer)
+    (should (eq (assq 'eshell-mode desktop-buffer-mode-handlers) third-party))
+    (should-not project-frame-sessions--desktop-handler-registrations)
+    (project-frame-sessions--remove-desktop-integrations)
+    (should (memq third-party desktop-buffer-mode-handlers))))
 
 (provide 'project-frame-sessions-tests)
 ;;; project-frame-sessions-tests.el ends here

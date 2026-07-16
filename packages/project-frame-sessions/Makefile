@@ -4,13 +4,16 @@ EMACS ?= emacs
 test: test-unit test-concurrency
 
 test-unit:
+	rm -f project-frame-sessions.elc
 	$(EMACS) -Q --batch -L . -l project-frame-sessions-tests.el -f ert-run-tests-batch-and-exit
 
 test-concurrency:
+	rm -f project-frame-sessions.elc
 	$(EMACS) -Q --batch -L . -l project-frame-sessions-concurrency-tests.el -f ert-run-tests-batch-and-exit
 
 test-graphical:
-	$(EMACS) -Q --batch -L . -l project-frame-sessions-graphical-tests.el -f ert-run-tests-batch-and-exit
+	@test -n "$$DISPLAY" || { echo "DISPLAY is required for graphical tests"; exit 1; }
+	$(EMACS) -Q --display "$$DISPLAY" -L . -l project-frame-sessions-graphical-tests.el --eval '(let ((stats (ert-run-tests-batch "^project-frame-sessions-graphical-"))) (kill-emacs (if (zerop (ert-stats-completed-unexpected stats)) 0 1)))'
 
 compile:
 	rm -f project-frame-sessions.elc
