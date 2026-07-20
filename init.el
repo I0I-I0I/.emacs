@@ -2250,6 +2250,13 @@ major mode."
             :branch "main")
   :hook (dired-mode . dired-clipboard-mode))
 
+(use-package paste-image
+  :ensure nil
+  :load-path "packages/paste-image"
+  :commands paste-image
+  :bind
+  (("C-c C-y" . paste-image)))
+
 (use-package ready-player
   :ensure t
   :defer 2
