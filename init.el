@@ -669,6 +669,53 @@ kill buffers that are local to the current frame before deleting it."
       (kill-new relative-path)
       (message "Copied relative path: %s" relative-path)))
 
+  (defun my/read-shell-command-with-history
+      (_original prompt &optional initial-contents history
+                 default-value inherit-input-method)
+    "Read a shell command using completion over `shell-command-history'."
+    ;; Completion minibuffers bind SPC to `minibuffer-complete-word' by
+    ;; default.  Use a private copy so shell commands can contain spaces
+    ;; without changing completion behavior in other minibuffers.
+    (let ((minibuffer-local-completion-map
+           (copy-keymap minibuffer-local-completion-map)))
+      (define-key minibuffer-local-completion-map (kbd "SPC")
+                  #'self-insert-command)
+      (completing-read prompt shell-command-history nil nil initial-contents
+                       (or history 'shell-command-history)
+                       default-value inherit-input-method)))
+
+  (advice-add 'read-shell-command :around
+              #'my/read-shell-command-with-history)
+
+  ;; Programs sometimes emit terminal color escapes even though shell-command
+  ;; output is not attached to a terminal.  Interpret those escapes instead of
+  ;; displaying them as literal `^[' characters.
+  (require 'ansi-color)
+
+  (defun my/colorize-shell-command-buffer (buffer)
+    "Apply ANSI colors to shell command BUFFER, when it is live."
+    (when-let* ((buffer (get-buffer buffer)))
+      (with-current-buffer buffer
+        (let ((inhibit-read-only t))
+          (ansi-color-apply-on-region (point-min) (point-max))))))
+
+  (defun my/colorize-synchronous-shell-command-output
+      (&rest _ignored)
+    "Colorize the standard output and error buffers used by `shell-command'."
+    (my/colorize-shell-command-buffer shell-command-buffer-name)
+    (when shell-command-default-error-buffer
+      (my/colorize-shell-command-buffer shell-command-default-error-buffer)))
+
+  (advice-add 'shell-command :after
+              #'my/colorize-synchronous-shell-command-output)
+
+  (add-hook 'shell-command-mode-hook #'ansi-color-for-comint-mode-on)
+
+  ;; Do not offer to kill an unrelated command merely because another async
+  ;; command is still running, and keep stderr out of the normal output.
+  (setq async-shell-command-buffer 'new-buffer
+        shell-command-default-error-buffer "*Shell Command Errors*")
+
   :bind
   (("C-v" . scroll-half-page-up)
    ("M-v" . scroll-half-page-down)
@@ -1418,7 +1465,7 @@ is non-nil, return only when it returns non-nil."
          ("C-c / c" . ibuffer-clear-filter-groups)))
 
 ;;; Tramp
-(setq auth-sources '("~/.authinfo.gpg"))
+;; (setq auth-sources '("~/.authinfo.gpg"))
 (setq auth-source-cache-expiry 7200)
 
 (use-package tramp
@@ -1526,29 +1573,28 @@ is non-nil, return only when it returns non-nil."
   (defun my/eshell--current-dir ()
     (expand-file-name default-directory))
 
-  (defun my/eshell--context (dir)
-    "Return the Tramp connection for DIR, or `local'."
-    (or (file-remote-p dir) 'local))
-
-  (defun my/eshell--find-related (dir)
-    "Find the Eshell most closely related to DIR.
-Prefer the same directory, then any shell on the same Tramp connection.  All
-local directories belong to one local context."
-    (let ((target (expand-file-name dir))
-          (context (my/eshell--context dir))
-          (buffers (seq-filter #'my/eshell--buffer-p (buffer-list))))
-      (or (seq-find (lambda (buffer)
-                      (string= (my/eshell--buf-dir buffer) target))
-                    buffers)
-          (seq-find (lambda (buffer)
-                      (equal (my/eshell--context (my/eshell--buf-dir buffer))
-                             context))
-                    buffers))))
+  (defun my/eshell--find-by-dir (dir)
+    "Return an existing Eshell whose working directory is DIR."
+    (let ((target (expand-file-name dir)))
+      (seq-find (lambda (buffer)
+                  (string= (my/eshell--buf-dir buffer) target))
+                (seq-filter #'my/eshell--buffer-p (buffer-list)))))
 
   (defun my/eshell--new-in-dir (dir)
     "Create a new eshell buffer and start it in DIR."
     (let ((default-directory dir))
 	  (eshell t)))
+
+  (defun my/eshell--terminal-buffer-p ()
+    "Return non-nil when the current buffer is an Eshell or Eat buffer."
+    (derived-mode-p 'eshell-mode 'eat-mode))
+
+  (defun my/eshell--new-from-terminal (dir current-window)
+    "Create an Eshell in DIR from the current terminal buffer.
+When CURRENT-WINDOW is nil, create and select a vertical split first."
+    (unless current-window
+      (select-window (split-window-right)))
+    (my/eshell--new-in-dir dir))
 
   (defvar my/eshell-return-tab nil
     "Tab to return to when toggling away from the eshell tab.")
@@ -1572,14 +1618,13 @@ Local shells share the `eshell' tab.  Each Tramp connection gets a distinct
 remote tab.  With NEW, always create a new Eshell buffer in that tab."
     (let ((eshell-tab (my/eshell-tab-name dir)))
       ;; Migrate remote tabs saved before connection-specific names were used.
-      (when (and (derived-mode-p 'eshell-mode)
-                 (file-remote-p default-directory)
+      (when (and (file-remote-p dir)
                  (string= (my/current-tab-name) "eshell"))
         (tab-bar-rename-tab eshell-tab))
 	  (my/with-dedicated-tab
 	   eshell-tab 'my/eshell-return-tab
 	   (lambda (_new-tab)
-         (let ((buf (and (not new) (my/eshell--find-related dir))))
+         (let ((buf (and (not new) (my/eshell--find-by-dir dir))))
            (if buf
 		       (switch-to-buffer buf)
              (my/eshell--new-in-dir dir)))
@@ -1587,10 +1632,15 @@ remote tab.  With NEW, always create a new Eshell buffer in that tab."
 	   t new)))
 
   (defun my/toggle-eshell-here (&optional new)
-    "Open/toggle eshell for the current directory in a dedicated tab.
-With prefix argument NEW, always create a new eshell buffer."
+    "Open/toggle Eshell for the current directory.
+From an Eshell or Eat buffer, create a new Eshell in a split; with prefix
+argument NEW, create it in the current window instead.  Elsewhere, use the
+dedicated Eshell tab, where NEW always creates a new buffer."
     (interactive "P")
-    (my/eshell--open-in-tab (my/eshell--current-dir) new))
+    (let ((dir (my/eshell--current-dir)))
+      (if (my/eshell--terminal-buffer-p)
+          (my/eshell--new-from-terminal dir new)
+        (my/eshell--open-in-tab dir new))))
 
   (defun my/eshell--project-dir ()
     "Return project root if available, else current `default-directory`."
@@ -1599,15 +1649,32 @@ With prefix argument NEW, always create a new eshell buffer."
 	  (my/eshell--current-dir)))
 
   (defun my/toggle-eshell-project (&optional new)
-    "Open/toggle eshell for the project root in a dedicated tab.
-With prefix argument NEW, always create a new eshell buffer."
+    "Open/toggle Eshell for the project root.
+From an Eshell or Eat buffer, create a new Eshell in a split; with prefix
+argument NEW, create it in the current window instead.  Elsewhere, use the
+dedicated Eshell tab, where NEW always creates a new buffer."
     (interactive "P")
-    (my/eshell--open-in-tab (my/eshell--project-dir) new))
+    (let ((dir (my/eshell--project-dir)))
+      (if (my/eshell--terminal-buffer-p)
+          (my/eshell--new-from-terminal dir new)
+        (my/eshell--open-in-tab dir new))))
 
   (defun my/enable-eat-eshell-mode ()
-    "Enable Eat's global Eshell integration without toggling it off.
-This is safe to run from every `eshell-mode-hook', including remote Eshells."
-    (eat-eshell-mode 1))
+    "Enable Eat's global Eshell integration once."
+    (unless (bound-and-true-p eat-eshell-mode)
+      (eat-eshell-mode 1)))
+
+  (defvar my/eshell-history-ring nil
+    "History ring shared by all Eshell buffers.")
+
+  (defun my/eshell-use-global-history ()
+    "Make the current Eshell use the shared history ring."
+    (if my/eshell-history-ring
+        (setq eshell-history-ring my/eshell-history-ring)
+      ;; The first Eshell has already loaded its history from disk.
+      (setq my/eshell-history-ring eshell-history-ring)))
+
+  (add-hook 'eshell-mode-hook #'my/eshell-use-global-history)
 
   (defun my/eshell-history-fuzzy ()
     (interactive)
@@ -1645,7 +1712,9 @@ This is safe to run from every `eshell-mode-hook', including remote Eshells."
 	  (keymap-set map "C-M-<tab>" #'tab-bar-switch-to-prev-tab)
 	  (keymap-set map "C-M-o" #'tab-bar-switch-to-next-tab)
 	  (keymap-set map "C-M-S-i" #'tab-bar-move-tab-backward)
-	  (keymap-set map "C-M-S-o" #'tab-bar-move-tab)))
+	  (keymap-set map "C-M-S-o" #'tab-bar-move-tab)
+      (keymap-set map "C-c e" #'my/toggle-eshell-here)
+      (keymap-set map "C-x p e" #'my/toggle-eshell-project)))
 
   (use-package bash-completion
     :ensure t
@@ -1657,7 +1726,11 @@ This is safe to run from every `eshell-mode-hook', including remote Eshells."
 	  (setq bash-completion-prog "wsl.exe")
 	  (setq bash-completion-args '("--" "bash")))
     (defun +eshell-bash-completion-capf-nonexclusive ()
-	  (let* ((bol-pos (save-mark-and-excursion
+	  (let* ((bash-completion-args
+              (if (file-remote-p default-directory)
+                  '("--noediting")
+                bash-completion-args))
+             (bol-pos (save-mark-and-excursion
                         (eshell-bol)
                         (point)))
              (compl (bash-completion-dynamic-complete-nocomint
@@ -1687,12 +1760,17 @@ This is safe to run from every `eshell-mode-hook', including remote Eshells."
 				              eshell-term
 				              eshell-tramp
 				              eshell-unix)
-        eshell-command-aliases-list '(("la" "ls -Alhvp --group-directories-first --color=always")
-					                  ("ll" "ls -lh --group-directories-first --color=always")
-					                  ("py" "uv run python"))
+        eshell-command-aliases-list
+        `(("la" ,(if (eq system-type 'gnu/linux)
+                     "ls -Alhvp --group-directories-first --color=auto"
+                   "ls -Alhp"))
+          ("ll" ,(if (eq system-type 'gnu/linux)
+                     "ls -lh --group-directories-first --color=auto"
+                   "ls -lh"))
+          ("py" "uv run python"))
         eshell-save-history-on-exit t
+        eshell-history-append t
         eshell-visual-commands '()
-        shell-browse-url-functions nil
         eshell-cmpl-cycle-completions nil
         eshell-cmpl-ignore-case t
         eshell-cmpl-autolist t
@@ -1702,15 +1780,64 @@ This is safe to run from every `eshell-mode-hook', including remote Eshells."
         eshell-buffer-maximum-lines 10000
         eshell-scroll-to-bottom-on-input 'all
         eshell-scroll-show-maximum-output t
-        eshell-hist-ignoredups t
+        eshell-hist-ignoredups 'erase
+        eshell-hist-ignore-space t
         eshell-prefer-lisp-functions nil)
 
   (defun eshell/o (&rest args)
+    "Open ARGS with the platform's default application."
     (let ((target (if args (string-join args " ") ".")))
 	  (cond ((eq system-type 'darwin) (start-process "open" nil "open" target))
             ((eq system-type 'windows-nt) (w32-shell-execute "open" target))
             ((executable-find "xdg-open") (start-process "xdg-open" nil "xdg-open" target))
             (t (user-error "No opener found")))))
+
+  (put 'eshell/o 'eshell-no-numeric-conversions t)
+
+  (defun eshell/q (&rest args)
+    "Run Fabric with low reasoning and Zen cookies for YouTube."
+    (let* ((fabric-bin
+            (or (executable-find "fabric")
+                (executable-find "fabric-ai")))
+           (zen-profile
+            (expand-file-name ".config/zen" (getenv "HOME")))
+           (youtube-p
+            (seq-some
+             (lambda (arg)
+               (member arg '("-y" "--youtube")))
+             args))
+           (thinking-p
+            (seq-some
+             (lambda (arg)
+               (or (string= arg "--thinking")
+                   (string-prefix-p "--thinking=" arg)))
+             args))
+           (yt-args-p
+            (seq-some
+             (lambda (arg)
+               (or (string= arg "--yt-dlp-args")
+                   (string-prefix-p "--yt-dlp-args=" arg)))
+             args))
+           (defaults nil))
+
+      (unless fabric-bin
+        (user-error "Fabric executable not found"))
+
+      (unless thinking-p
+        (push "--thinking=low" defaults))
+
+      (when (and youtube-p (not yt-args-p))
+        (push
+         (format
+          "--yt-dlp-args=--ignore-no-formats-error --cookies-from-browser firefox:%s"
+          zen-profile)
+         defaults))
+
+      (eshell-external-command
+       fabric-bin
+       (append (nreverse defaults) args))))
+
+  (put 'eshell/q 'eshell-no-numeric-conversions t)
 
   (defun my/eshell-setup-keymaps ()
     "Set up Eshell key bindings, including global tab switching."
@@ -2707,11 +2834,9 @@ point on the parent heading; Org then inserts the entry as a child."
   (org-hide-emphasis-markers t)
   (org-hide-leading-stars t)
   (org-pretty-entities t)
-  (org-ellipsis " ▾")
   (org-return-follows-link t)
   (org-src-fontify-natively t)
   (org-src-tab-acts-natively t)
-  (org-edit-src-content-indentation 0)
   (org-confirm-babel-evaluate #'my/org-confirm-babel-evaluate)
   (org-startup-with-inline-images t)
   (org-startup-with-latex-preview t)
@@ -2921,7 +3046,7 @@ on the copy bundled with Mason's Svelte language server."
    `(python-ts-mode
      . ,(eglot-alternatives
          '(
-           ("rass" "--" "ty" "server" "--" "ruff" "server")
+           ;; ("rass" "--" "ty" "server" "--" "ruff" "server")
            ("rass" "--" "basedpyright-langserver" "--stdio" "--" "ruff" "server")
            ("ty" "server")
            ("basedpyright-langserver" "--stdio")

@@ -13,8 +13,8 @@
 ;; local projects that do not yet have a saved session; selecting one opens its
 ;; root in Dired and enrolls that frame transactionally.  Desktop saves buffers,
 ;; and Frameset saves the complete tab-bar workspace.  Tabspaces' frame-local
-;; buffer lists are represented by the built-in tab parameters and are therefore
-;; preserved without copying Tabspaces globals.  Frame buffers are preserved on
+;; buffer lists are serialized per tab without copying Tabspaces globals.  Frame
+;; buffers are preserved on
 ;; close by default; optional cleanup only happens after a successful save and
 ;; deletion and never kills buffers shared with another frame.
 ;;
@@ -154,6 +154,12 @@ between its atomic directory creation and owner metadata publication."
   "Function used to report visible warnings."
   :type 'function)
 
+(defcustom project-frame-sessions-warning-repeat-limit 3
+  "Maximum times an identical warning is displayed per Emacs session.
+Nil means identical warnings are not limited."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Maximum repetitions")))
+
 (defcustom project-frame-sessions-show-status nil
   "When non-nil, manual commands include concise session status messages."
   :type 'boolean)
@@ -164,6 +170,10 @@ between its atomic directory creation and owner metadata publication."
 (defconst project-frame-sessions--deleted-parameter 'project-frame-sessions-deleted)
 (defconst project-frame-sessions--excluded-buffers-parameter
   'project-frame-sessions-excluded-buffers)
+(defconst project-frame-sessions--tab-buffer-list-parameter
+  'project-frame-sessions-tab-buffer-list)
+(defconst project-frame-sessions--tab-buried-buffer-list-parameter
+  'project-frame-sessions-tab-buried-buffer-list)
 (defconst project-frame-sessions--generic-frame-names
   '("" "Emacs" "GNU Emacs" "emacs" "*scratch*"))
 (defconst project-frame-sessions--desktop-state-variables
@@ -192,9 +202,13 @@ between its atomic directory creation and owner metadata publication."
 (defvar project-frame-sessions--pending-frame-closes (make-hash-table :test #'eq)
   "Frames whose delete hook has already saved and scheduled finalization.")
 (defvar project-frame-sessions--recovery-warning-shown nil)
+(defvar project-frame-sessions--warning-counts (make-hash-table :test #'equal)
+  "Number of times each warning message has been displayed.")
 (defvar project-frame-sessions--inhibit-dirty nil)
 (defvar project-frame-sessions--save-buffer-exclusions nil
   "Buffers dynamically excluded from the save currently in progress.")
+(defvar project-frame-sessions--frameset-save-frame nil
+  "Frame whose tab buffer lists are being serialized.")
 (defvar project-frame-sessions--desktop-restored-buffers nil
   "Buffers restored by the dynamically active Desktop read.")
 (defvar project-frame-sessions--utility-restore-cache nil
@@ -246,9 +260,15 @@ between its atomic directory creation and owner metadata publication."
   t)
 
 (defun project-frame-sessions--warn (format-string &rest args)
-  "Issue a package warning made from FORMAT-STRING and ARGS."
-  (funcall project-frame-sessions-warn-function
-           'project-frame-sessions (apply #'format format-string args) :warning))
+  "Issue a package warning made from FORMAT-STRING and ARGS.
+Identical messages are limited by `project-frame-sessions-warning-repeat-limit'."
+  (let* ((message (apply #'format format-string args))
+         (count (gethash message project-frame-sessions--warning-counts 0)))
+    (when (or (null project-frame-sessions-warning-repeat-limit)
+              (< count project-frame-sessions-warning-repeat-limit))
+      (puthash message (1+ count) project-frame-sessions--warning-counts)
+      (funcall project-frame-sessions-warn-function
+               'project-frame-sessions message :warning))))
 
 (defun project-frame-sessions--canonical-root (root)
   "Return canonical local ROOT, or nil."
@@ -626,10 +646,41 @@ A corrupt index is never treated as an empty index."
       (and project-frame-sessions-tab-omit-function
            (funcall project-frame-sessions-tab-omit-function tab))))
 
+(defun project-frame-sessions--buffer-names (buffers)
+  "Return the names of live BUFFERS."
+  (delq nil
+        (mapcar (lambda (buffer)
+                  (and (buffer-live-p buffer) (buffer-name buffer)))
+                buffers)))
+
 (defun project-frame-sessions--filter-tabs (current filtered parameters saving)
   "Sanitize CURRENT tabs and optionally omit tabs while SAVING.
 FILTERED and PARAMETERS are passed through to `frameset-filter-tabs'."
   (let ((parameter (frameset-filter-tabs current filtered parameters saving)))
+    ;; `frameset-filter-tabs' deliberately removes `wc-bl' and `wc-bbl'.
+    ;; Tabspaces uses those parameters as each hidden tab's buffer list, so
+    ;; preserve their printable names under private parameters.  The current
+    ;; tab keeps the corresponding lists directly on its frame.
+    (when (and saving project-frame-sessions--frameset-save-frame)
+      (cl-mapc
+       (lambda (source target)
+         (let ((currentp (eq (car-safe source) 'current-tab)))
+           (setf (alist-get project-frame-sessions--tab-buffer-list-parameter
+                            (cdr target))
+                 (project-frame-sessions--buffer-names
+                  (if currentp
+                      (frame-parameter project-frame-sessions--frameset-save-frame
+                                       'buffer-list)
+                    (alist-get 'wc-bl source))))
+           (setf (alist-get
+                  project-frame-sessions--tab-buried-buffer-list-parameter
+                  (cdr target))
+                 (project-frame-sessions--buffer-names
+                  (if currentp
+                      (frame-parameter project-frame-sessions--frameset-save-frame
+                                       'buried-buffer-list)
+                    (alist-get 'wc-bbl source))))))
+       (cdr current) (cdr parameter)))
     (if (not (and saving
                   (or project-frame-sessions-ignored-tab-name-regexp
                       project-frame-sessions-tab-omit-function)))
@@ -645,6 +696,58 @@ FILTERED and PARAMETERS are passed through to `frameset-filter-tabs'."
         (when (and kept (not current-tab))
           (setcar kept (cons 'current-tab (cdar kept))))
         (cons (car parameter) kept)))))
+
+(defun project-frame-sessions--restore-tab-buffer-lists (frame)
+  "Restore Tabspaces buffer lists serialized in FRAME's tab parameters."
+  (with-selected-frame frame
+    (let* ((tabs (frame-parameter frame 'tabs))
+           (current-index
+            (cl-position-if (lambda (tab) (eq (car-safe tab) 'current-tab))
+                            tabs)))
+      (when (and current-index
+                 (cl-some
+                  (lambda (tab)
+                    (assq project-frame-sessions--tab-buffer-list-parameter tab))
+                  tabs))
+        ;; A tab restored from a printable window state does not make Emacs
+        ;; apply its `wc-bl'.  Visit each tab once, install its exact list on
+        ;; the frame, and let the next selection copy that list into `wc-bl'.
+        (cl-labels
+            ((apply-current-list
+              ()
+              (let ((tab (tab-bar--current-tab)))
+                (when (assq project-frame-sessions--tab-buffer-list-parameter
+                            tab)
+                  (set-frame-parameter
+                   frame 'buffer-list
+                   (delq nil
+                         (mapcar
+                          #'get-buffer
+                          (alist-get
+                           project-frame-sessions--tab-buffer-list-parameter
+                           tab))))
+                  (set-frame-parameter
+                   frame 'buried-buffer-list
+                   (delq nil
+                         (mapcar
+                          #'get-buffer
+                          (alist-get
+                           project-frame-sessions--tab-buried-buffer-list-parameter
+                           tab))))))))
+          (dotimes (index (length tabs))
+            (tab-bar-select-tab (1+ index))
+            (apply-current-list))
+          (tab-bar-select-tab (1+ current-index))
+          (apply-current-list))
+        (setq tabs (frame-parameter frame 'tabs))
+        (dolist (tab tabs)
+          (setcdr tab
+                  (assq-delete-all
+                   project-frame-sessions--tab-buffer-list-parameter
+                   (assq-delete-all
+                    project-frame-sessions--tab-buried-buffer-list-parameter
+                    (cdr tab)))))
+        (set-frame-parameter frame 'tabs tabs)))))
 
 (defun project-frame-sessions--tab-parameter-buffers (frame)
   "Return live buffers stored in FRAME's tab parameters."
@@ -1223,6 +1326,7 @@ fall back to the selected frame."
                    (desktop-globals-to-save nil)
                    (desktop-file-name-format 'absolute)
                    (desktop-base-file-name project-frame-sessions--desktop-name)
+                   (project-frame-sessions--frameset-save-frame frame)
                    (frameset-filter-alist
                     (append
                      `((,project-frame-sessions--excluded-buffers-parameter
@@ -1679,7 +1783,8 @@ recent Emacs versions, so capture it when Desktop offers to restore it."
        :reuse-frames (lambda (candidate) (eq candidate frame))
        :cleanup-frames nil :force-display t
        :force-onscreen (and desktop-restore-forces-onscreen
-                            (display-graphic-p frame))))))
+                            (display-graphic-p frame))))
+    (project-frame-sessions--restore-tab-buffer-lists frame)))
 
 (defun project-frame-sessions--delete-new-frames (before)
   "Delete frames not present in BEFORE, returning cleanup errors."

@@ -23,6 +23,7 @@
   (project-frame-sessions-graphical-tests--with-store
     (let* ((source (make-temp-file "pfs-graphical-buffer-" nil ".txt" "saved text"))
            (buffer (find-file-noselect source))
+           (second (get-buffer-create "*pfs-second*"))
            (frame (project-frame-sessions-graphical-tests--make-frame
                    '((name . "PFS graphical test"))))
            entry)
@@ -30,10 +31,12 @@
           (progn
             (with-selected-frame frame
               (switch-to-buffer buffer)
+              (set-frame-parameter frame 'buffer-list (list buffer))
               (tab-bar-mode 1)
               (tab-bar-new-tab)
               (tab-bar-rename-tab "Second")
-              (switch-to-buffer (get-buffer-create "*pfs-second*")))
+              (switch-to-buffer second)
+              (set-frame-parameter frame 'buffer-list (list second)))
             (let ((project-frame-sessions-discovery-function #'ignore))
               (setq entry (project-frame-sessions-save frame)))
             (should (file-regular-p
@@ -45,12 +48,19 @@
             (should (equal (project-frame-sessions--frame-id frame)
                            (plist-get entry :id)))
             (should (get-buffer (file-name-nondirectory source)))
-            (should (>= (length (frame-parameter frame 'tabs)) 2)))
+            (should (>= (length (frame-parameter frame 'tabs)) 2))
+            (with-selected-frame frame
+              (tab-bar-select-tab 1)
+              (should (memq buffer (frame-parameter frame 'buffer-list)))
+              (should-not (memq second (frame-parameter frame 'buffer-list)))
+              (tab-bar-select-tab 2)
+              (should (memq second (frame-parameter frame 'buffer-list)))
+              (should-not (memq buffer (frame-parameter frame 'buffer-list)))))
         (when (frame-live-p frame)
           (let ((project-frame-sessions--delete-suppressed frame))
             (delete-frame frame t)))
         (when (buffer-live-p buffer) (kill-buffer buffer))
-        (when-let* ((second (get-buffer "*pfs-second*"))) (kill-buffer second))
+        (when (buffer-live-p second) (kill-buffer second))
         (ignore-errors (delete-file source))))))
 
 (ert-deftest project-frame-sessions-graphical-frame-close-buffer-policy ()
