@@ -305,16 +305,29 @@ otherwise, read a new character.  Repeating moves to earlier matches."
         (goto-char start)
         (user-error "No earlier `%c' on this line" char))))
 
-  (defun my/isearch-forward-dwim ()
-    "Search forward, using the active region when available."
-    (interactive)
-    (when (use-region-p)
-      (add-to-history 'search-ring
-                      (buffer-substring-no-properties
-                       (region-beginning)
-                       (region-end))))
-    (deactivate-mark)
-    (call-interactively #'isearch-forward))
+  (defvar-local my/isearch-jump-origin nil
+    "Marker for the location from which the current Isearch started.")
+
+  (defun my/isearch-record-jump ()
+    "Record the Isearch origin when Isearch finishes at another location."
+    (when-let* ((origin my/isearch-jump-origin)
+                ((marker-buffer origin)))
+      (setq my/isearch-jump-origin nil)
+      (when (and (/= (point) (marker-position origin))
+                 (bound-and-true-p better-jumper-local-mode)
+                 buffer-file-name)
+        (save-excursion
+          (goto-char origin)
+          (better-jumper-set-jump)))
+      (set-marker origin nil)))
+
+  (defun my/isearch-track-jump-origin ()
+    "Remember the origin of every Isearch for Better Jumper."
+    ;; `isearch-opoint' is the position before Isearch moved point.  Using
+    ;; `isearch-mode-hook' covers ordinary, regexp, backward, and thing-at-point
+    ;; searches instead of just `isearch-forward-thing-at-point'.
+    (setq my/isearch-jump-origin (copy-marker isearch-opoint))
+    (add-hook 'isearch-mode-end-hook #'my/isearch-record-jump nil t))
 
   (defun my/minibuffer-insert-region-or-symbol ()
     "Insert the active region or symbol from the originating buffer."
@@ -751,7 +764,7 @@ kill buffers that are local to the current frame before deleting it."
    ("C-x b" . switch-to-buffer)
    ("C-x B" . switch-to-buffer-other-window)
 
-   ("C-s" . my/isearch-forward-dwim)
+   ("C-M-s" . isearch-forward-thing-at-point)
    ("C-'" . my/jump-to-first-match-char-in-line)
    ("C-\"" . my/jump-to-first-match-char-backward-in-line)
 
@@ -1480,8 +1493,26 @@ is non-nil, return only when it returns non-nil."
   ;; (with-eval-after-load 'tramp-sh
   ;;   (setq tramp-use-connection-share nil))
 
+  (defun my/tramp-cleanup-this-connection ()
+    "Close the TRAMP connection associated with the current buffer."
+    (interactive)
+    (if (file-remote-p default-directory)
+        (progn
+          (tramp-cleanup-this-connection)
+          (message "TRAMP connection closed"))
+      (user-error "Current buffer is not remote")))
+
+  (defun my/tramp-cleanup-all ()
+    "Close every TRAMP connection."
+    (interactive)
+    (tramp-cleanup-all-connections))
+
   (add-to-list 'backup-directory-alist
-               (cons tramp-file-name-regexp nil)))
+               (cons tramp-file-name-regexp
+                     (expand-file-name "tramp-backups/" user-emacs-directory)))
+
+  :bind (("C-c R c" . my/tramp-cleanup-this-connection)
+         ("C-c R C" . my/tramp-cleanup-all)))
 
 ;;; Shells and terminals
 ;; (use-package vterm
@@ -1643,10 +1674,14 @@ dedicated Eshell tab, where NEW always creates a new buffer."
         (my/eshell--open-in-tab dir new))))
 
   (defun my/eshell--project-dir ()
-    "Return project root if available, else current `default-directory`."
-    (if-let* ((pr (project-current nil)))
-        (expand-file-name (project-root pr))
-	  (my/eshell--current-dir)))
+    "Return the local project root or the current directory.
+Avoid project discovery over Tramp, where it may require expensive remote
+filesystem traversal and subprocesses."
+    (if (file-remote-p default-directory)
+        (my/eshell--current-dir)
+      (if-let* ((pr (project-current nil)))
+          (expand-file-name (project-root pr))
+        (my/eshell--current-dir))))
 
   (defun my/toggle-eshell-project (&optional new)
     "Open/toggle Eshell for the project root.
@@ -1762,12 +1797,12 @@ dedicated Eshell tab, where NEW always creates a new buffer."
 				              eshell-unix)
         eshell-command-aliases-list
         `(("la" ,(if (eq system-type 'gnu/linux)
-                     "ls -Alhvp --group-directories-first --color=auto"
-                   "ls -Alhp"))
+                     "ls -Alhvp --group-directories-first --color=auto $*"
+                   "ls -Alhp $*"))
           ("ll" ,(if (eq system-type 'gnu/linux)
-                     "ls -lh --group-directories-first --color=auto"
-                   "ls -lh"))
-          ("py" "uv run python"))
+                     "ls -lh --group-directories-first --color=auto $*"
+                   "ls -lh $*"))
+          ("py" "uv run python $*"))
         eshell-save-history-on-exit t
         eshell-history-append t
         eshell-visual-commands '()
@@ -2061,8 +2096,11 @@ dedicated Eshell tab, where NEW always creates a new buffer."
       xref-find-apropos
 
       imenu
+      goto-line
       beginning-of-defun
       end-of-defun
+      forward-sentence
+      backward-sentence
       mark-defun
       outline-next-visible-heading
       outline-previous-visible-heading
@@ -2092,7 +2130,9 @@ dedicated Eshell tab, where NEW always creates a new buffer."
       avy-goto-word-1
 
       beginning-of-buffer
-      end-of-buffer)
+      end-of-buffer
+      mark-whole-buffer
+      mark-page)
     "Commands that should record the current location before running.")
 
   (defun my/better-jumper-set-jump (&rest _)
@@ -2102,6 +2142,21 @@ dedicated Eshell tab, where NEW always creates a new buffer."
                buffer-file-name
                (not (minibufferp)))
       (better-jumper-set-jump)))
+
+  (defun my/better-jumper-consult-set-jump (position &rest _)
+    "Record the origin of a successful Consult jump to POSITION.
+This advises `consult--jump', rather than the public Consult commands, so
+previewing or aborting a selection does not modify the jump list."
+    (when-let* ((position (car-safe (ensure-list position)))
+                (target-buffer (if (markerp position)
+                                   (marker-buffer position)
+                                 (current-buffer))))
+      (unless (and (eq target-buffer (current-buffer))
+                   (= position (point)))
+        (when (and (bound-and-true-p better-jumper-local-mode)
+                   buffer-file-name
+                   (not (minibufferp)))
+          (better-jumper-set-jump)))))
 
   (defun my/better-jumper-add-advices ()
     "Install Better Jumper advice for navigation commands."
@@ -2113,7 +2168,10 @@ dedicated Eshell tab, where NEW always creates a new buffer."
   (defun my/better-jumper-remove-advices ()
     "Remove navigation advice installed by this configuration."
     (dolist (command my/better-jumper-commands)
-      (advice-remove command #'my/better-jumper-set-jump)))
+      (advice-remove command #'my/better-jumper-set-jump))
+    (when (fboundp 'consult--jump)
+      (advice-remove 'consult--jump #'my/better-jumper-consult-set-jump))
+    (remove-hook 'isearch-mode-hook #'my/isearch-track-jump-origin))
 
   (defun my/better-jumper-highlight ()
     "Briefly highlight the destination after following a jump."
@@ -2124,10 +2182,16 @@ dedicated Eshell tab, where NEW always creates a new buffer."
   (better-jumper-mode 1)
 
   :hook
-  (better-jumper-post-jump-hook . 'my/better-jumper-highlight)
+  (better-jumper-post-jump-hook . my/better-jumper-highlight)
 
   :config
   (my/better-jumper-add-advices)
+  (add-hook 'isearch-mode-hook #'my/isearch-track-jump-origin)
+  (with-eval-after-load 'consult
+    ;; `consult--jump' runs only when a candidate is committed; Consult's
+    ;; preview machinery uses a different function.
+    (advice-remove 'consult--jump #'my/better-jumper-consult-set-jump)
+    (advice-add 'consult--jump :before #'my/better-jumper-consult-set-jump))
 
   :bind
   (("C-<" . better-jumper-jump-backward)
